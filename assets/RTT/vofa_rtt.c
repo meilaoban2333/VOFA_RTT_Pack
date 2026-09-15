@@ -1,6 +1,12 @@
 #include "vofa_rtt.h"
-#include <math.h>//sinf/cosf/isfinite
+#include <math.h>//sinf/cosf(TestLoop 用)，FireWater 还用到 isfinite
 #include "main.h"//HAL_GetTick
+
+#if (VOFA_PROTOCOL == VOFA_PROTO_JUSTFLOAT)
+#include <string.h>//memcpy
+#endif
+
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER)
 
 /* 单帧最大字节数：每通道最多 VOFA_NUM_MAX 字节，通道间 1 字节逗号，末尾 1 字节 '\n' */
 #define VOFA_FRAME_MAX      (VOFA_CH_MAX * (VOFA_NUM_MAX + 1) + 1)
@@ -88,6 +94,16 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	return len;
 }
 
+#else  /* VOFA_PROTO_JUSTFLOAT */
+
+/* 单帧最大字节数：每通道 4 字节小端 float，加 4 字节帧尾 */
+#define VOFA_FRAME_MAX      (VOFA_CH_MAX * 4 + 4)
+
+/* JustFloat 帧尾：小端 0x7F800000(+inf)，VOFA+ 以此切分帧边界 */
+static const uint8_t VOFA_FrameTail[4] = {0x00, 0x00, 0x80, 0x7F};
+
+#endif /* VOFA_PROTOCOL */
+
 /**
  * @brief VOFA+ RTT 初始化
  * @note  0 号通道由 SEGGER_RTT_Init() 自动预置为 "Terminal"，无需 ConfigUpBuffer。
@@ -100,6 +116,8 @@ void VOFA_RTT_Init(void)
 	/*0 号通道缓冲满时丢帧，绝不阻塞主循环（默认即为此模式，此处显式声明意图）*/
 	SEGGER_RTT_SetFlagsUpBuffer(VOFA_RTT_BUF_IDX, SEGGER_RTT_MODE_NO_BLOCK_SKIP);
 }
+
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER)
 
 /**
  * @brief 推送一帧 FireWater 文本数据
@@ -133,6 +151,40 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
 
 	SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
 }
+
+#else  /* VOFA_PROTO_JUSTFLOAT */
+
+/**
+ * @brief 推送一帧 JustFloat 二进制数据
+ * @param data   指向 ch_num 个 float
+ * @param ch_num 通道数，需 <= VOFA_CH_MAX
+ * @note  帧格式 [f0:4B][f1:4B]...[00 00 80 7F]，帧尾是 VOFA+ 的切分依据。
+ *        整帧一次性写入，避免多次调用 RTT_Write 导致帧被割裂——二进制流被
+ *        割裂比文本更严重，会让之后所有通道错位。
+ *        本平台是小端序，float 内存布局与 JustFloat 要求一致，可直接 memcpy，
+ *        不做任何数值转换，这正是 JustFloat 相比 FireWater 省开销的地方。
+ */
+void VOFA_RTT_Send(const float *data, unsigned ch_num)
+{
+	uint8_t  frame[VOFA_FRAME_MAX];
+	unsigned len = 0;
+
+	if ((data == 0) || (ch_num == 0) || (ch_num > VOFA_CH_MAX))
+	{
+		return;
+	}
+
+	/*data 由调用方保证是 float 数组，此处按字节整体拷贝，不做任何数值转换*/
+	memcpy(&frame[len], data, ch_num * 4u);
+	len += ch_num * 4u;
+
+	memcpy(&frame[len], VOFA_FrameTail, sizeof(VOFA_FrameTail));
+	len += sizeof(VOFA_FrameTail);
+
+	SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
+}
+
+#endif /* VOFA_PROTOCOL */
 
 /**
  * @brief 单通道推送

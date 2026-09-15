@@ -92,7 +92,7 @@ Revision: $Rev: 24316 $
 #endif
 
 #ifndef   BUFFER_SIZE_UP
-  #define BUFFER_SIZE_UP                            (2048)  // 0 号上行缓冲：VOFA+ FireWater 文本帧走此通道，2K 提供充足丢帧余量
+  #define BUFFER_SIZE_UP                            (2048)  // 0 号上行缓冲：VOFA+ 波形帧走此通道，2K 对 FireWater/JustFloat 都有充足丢帧余量
 #endif
 
 #ifndef   BUFFER_SIZE_DOWN

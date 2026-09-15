@@ -6,9 +6,11 @@
 * 开关用位掩码保存：每个项目号占 1 bit，收到号就异或翻转，
 * 所以多个项目天然可以叠加打印，同一个号发第二次即关闭。
 *
-* 输出为 VOFA+ FireWater 纯数据格式（逗号分隔 + '
-'），不带任何标签文本，
-* 整帧一次性写入 RTT，避免分次写入被拆行导致上位机解析错行。
+* 输出调 VOFA_RTT_Send()，具体帧格式由 vofa_rtt.h 的 VOFA_PROTOCOL 决定，
+* 本文件两种协议通用。整帧一次性写入 RTT，避免分次写入被拆散导致上位机错位。
+*
+* 不带任何标签文本：FireWater 下标签会被当成数据行，JustFloat 下更会直接
+* 破坏二进制帧对齐，两种协议都不能混入文本。
 *
 * 本文件是模板：LogPrint() 里的取值代码要换成自己工程的变量，
 * 其余命令解析、组帧逻辑可直接复用。
@@ -24,8 +26,7 @@
 static uint32_t s_mask = 0; // 已开启项，bit N 对应 LOG_ID_N
 
 /*
- * 执行一条完成的命令行，line 已去掉 '
-'
+ * 执行一条完成的命令行，line 已去掉换行符
  * 只认 "AT+" 前缀，后面的数字用非数字字符（逗号、空格等）分隔
  */
 static void LogCmdExec(const char *line, uint8_t len)
@@ -57,7 +58,8 @@ static void LogCmdExec(const char *line, uint8_t len)
         if (!hasDigit)
             continue;
 
-        /* 不回显开关状态：FireWater 是纯数据协议，混入文本会被当成数据行 */
+        /* 不回显开关状态：上行是纯数据流，混入文本 FireWater 下会被当成
+           数据行，JustFloat 下会破坏帧对齐，两种协议都不能回显 */
         if (id == LOG_ID_OFF)
             s_mask = 0;
         else if (id < 32)
@@ -66,8 +68,7 @@ static void LogCmdExec(const char *line, uint8_t len)
 }
 
 /*
- * 收下行字节并按 '
-' 组行
+ * 收下行字节并按换行符组行
  * RTT 读取是非阻塞的，没数据就立即返回 0
  */
 static void LogCmdPoll(void)
@@ -78,8 +79,8 @@ static void LogCmdPoll(void)
     char ch;
 
     while (SEGGER_RTT_Read(VOFA_RTT_BUF_IDX, &ch, 1) > 0) {
-        if (ch == '
-' || ch == '') {
+        /* '\r' 和 '\n' 都当行结束，兼容上位机只发其中一种的情况 */
+        if (ch == '\n' || ch == '\r') {
             if (s_len > 0) {
                 LogCmdExec(s_line, s_len);
                 s_len = 0;
@@ -123,7 +124,7 @@ static void LogPrint(void)
         ch[n++] = 0.0f; // 电转速
     }
 
-    /* 整帧一次性写入，避免多次 RTT_Write 被拆行导致上位机解析错行 */
+    /* 整帧一次性写入，避免多次 VOFA_RTT_Send 被拆散导致上位机解析错位 */
     VOFA_RTT_Send(ch, n);
 }
 

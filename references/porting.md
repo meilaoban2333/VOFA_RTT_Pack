@@ -208,19 +208,26 @@ STM32CubeIDE 是 Eclipse 内核，不用 CMake 时：
 2. **头文件找得到**：无 `vofa_rtt.h: No such file`。报错说明 include 路径没配对。
 3. **烧录后跑 `start_rtt.bat`**：看到 `Connected` 且没有 `Cannot connect`。
    连不上先查 bat 里 `DEVICE` 器件名。
-4. **先用文本确认数据**（FireWater 的好处，比直接连 VOFA+ 更容易定位）：
-   在 J-Link Commander 里敲 `rtt read 0`，或开 RTT Viewer 连上，
+4. **先用文本确认数据**（建议先保持默认的 FireWater 做这一步，比直接连 VOFA+
+   更容易定位问题）：在 J-Link Commander 里敲 `rtt read 0`，或开 RTT Viewer 连上，
    应该能看到形如 `12.345,-6.789` 的**可读文本**逐行刷出来。
    - 一个字符都没有 → 内核被 halt，在 `J-Link>` 敲 `g` 放行
-   - 有数据但是乱码 → 发送端不是 FireWater，核对 `vofa_rtt.c` 是不是被改成了二进制
-5. **VOFA+ 连上 19021**：数据接口 TCP 客户端，协议选 **FireWater**。
+   - 有数据但是乱码 → 当前跑的是 JustFloat（二进制流本来就不可读）。
+     确认 `vofa_rtt.h` 的 `VOFA_PROTOCOL`；想用这一步定位就临时切回 FireWater。
+5. **VOFA+ 连上 19021**：数据接口 TCP 客户端，**协议选得和 `VOFA_PROTOCOL` 一致**
+   （`VOFA_PROTO_FIREWATER` → FireWater，`VOFA_PROTO_JUSTFLOAT` → JustFloat）。
+   这一项配错是"链路都通就是没波形"的头号原因。
 6. **看到正弦+余弦两条波**：`VOFA_RTT_TestLoop()` 的自检波形，1Hz、幅值 100、相差 90°。
    看到这个说明整条链路通了，把 `TestLoop` 换成自己的变量即可。
-7. **（可选）验 `LOG()`**：随便打一句 `LOG("hello %.2f
-", 1.5f)`，
-   RTT Viewer 里应出现 `hello 1.50`。打出 `hello %f` 原样说明用的不是本包改过的
-   `SEGGER_RTT_printf.c`（SEGGER 原版不支持 `%f`），检查是否被工程里的旧版覆盖。
-   **验完记得关掉，LOG 文本会污染 FireWater 波形数据流。**
-8. **（可选）验下行命令**：确认 `LogTask()` 被周期调用后，
+7. **（可选）切协议复验**：改 `vofa_rtt.h` 的 `VOFA_PROTOCOL`，重新编译烧录，
+   同时改 VOFA+ 的数据格式，波形应该和之前完全一致（JustFloat 精度更高，
+   小数位不再被截断）。波形消失就是两边协议没对上。
+8. **（可选）验 `LOG()`**：**仅 FireWater 下有效**。随便打一句
+   `LOG("hello %.2f\n", 1.5f)`，RTT Viewer 里应出现 `hello 1.50`。
+   - 打出 `hello %f` 原样 → 用的不是本包改过的 `SEGGER_RTT_printf.c`
+     （SEGGER 原版不支持 `%f`），检查是否被工程里的旧版覆盖
+   - 什么都没有 → 确认 `VOFA_PROTOCOL` 是不是 JustFloat，该协议下 LOG 被编译期禁用
+   **验完记得关掉，LOG 文本会污染波形数据流。**
+9. **（可选）验下行命令**：确认 `LogTask()` 被周期调用后，
    在 RTT Viewer 输入行发 `AT+1` 加回车，对应观察项的曲线应该出现；再发一次应消失。
-   没反应先查命令有没有带换行符。
+   没反应先查命令有没有带换行符。下行命令与上行协议无关，两种协议下都该好使。
