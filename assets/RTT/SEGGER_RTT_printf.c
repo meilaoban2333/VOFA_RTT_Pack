@@ -298,6 +298,168 @@ static void _PrintInt(SEGGER_RTT_PRINTF_DESC * pBufferDesc, int v, unsigned Base
 
 /*********************************************************************
 *
+*       _PrintString
+*
+*  功能
+*    按字段宽度/左对齐标志输出一个字符串。
+*    供 _PrintFloat 打印 NaN / Inf 标记时使用。
+*/
+static void _PrintString(SEGGER_RTT_PRINTF_DESC * pBufferDesc, const char * s, unsigned FieldWidth, unsigned FormatFlags) {
+  unsigned Width;
+  unsigned i;
+
+  Width = 0u;
+  while (s[Width] != '\0') {
+    Width++;
+  }
+  if ((FormatFlags & FORMAT_FLAG_LEFT_JUSTIFY) == 0u) {
+    for (i = Width; (i < FieldWidth) && (pBufferDesc->ReturnValue >= 0); i++) {
+      _StoreChar(pBufferDesc, ' ');
+    }
+  }
+  for (i = 0u; (i < Width) && (pBufferDesc->ReturnValue >= 0); i++) {
+    _StoreChar(pBufferDesc, s[i]);
+  }
+  if ((FormatFlags & FORMAT_FLAG_LEFT_JUSTIFY) == FORMAT_FLAG_LEFT_JUSTIFY) {
+    for (i = Width; (i < FieldWidth) && (pBufferDesc->ReturnValue >= 0); i++) {
+      _StoreChar(pBufferDesc, ' ');
+    }
+  }
+}
+
+/*********************************************************************
+*
+*       _PrintFloat
+*
+*  功能
+*    以定点形式打印 double（即 "%f"）。
+*    SEGGER 原版实现完全不支持 %f，这是本工程补充的。
+*
+*  说明
+*    (1) 只做定点，不支持科学计数法：嵌入式日志看的是可读量程，
+*        %e/%g 代码体积代价大得多。
+*    (2) 整数部分拆进 32 位变量，故可打印范围为 ±4294967295。
+*        超出该范围以及 NaN/Inf，统一打印标记而不是静默回绕。
+*    (3) 精度默认 6 位（与标准 printf 一致），并钳位到 9 位，
+*        保证 10^精度 仍在 32 位内。
+*/
+static void _PrintFloat(SEGGER_RTT_PRINTF_DESC * pBufferDesc, double v, unsigned Precision, unsigned FieldWidth, unsigned FormatFlags) {
+  unsigned Scale;
+  unsigned i;
+  unsigned IntPart;
+  unsigned FracPart;
+  unsigned Width;
+  unsigned Neg;
+  double   Rounded;
+
+  //
+  // NaN / Inf 没有定点表示形式。用 v 与自身比较来判断 NaN，
+  // 这样不必引入 <math.h>。
+  //
+  if (v != v) {
+    _PrintString(pBufferDesc, "NaN", FieldWidth, FormatFlags);
+    return;
+  }
+  Neg = 0u;
+  if (v < 0.0) {
+    Neg = 1u;
+    v   = -v;
+  }
+  if (v > 4294967295.0) {
+    _PrintString(pBufferDesc, Neg ? "-Inf" : "Inf", FieldWidth, FormatFlags);
+    return;
+  }
+  //
+  // 钳位精度，保证 Scale = 10^Precision 不超出 32 位。
+  //
+  if (Precision > 9u) {
+    Precision = 9u;
+  }
+  Scale = 1u;
+  for (i = 0u; i < Precision; i++) {
+    Scale *= 10u;
+  }
+  //
+  // 先按目标精度四舍五入，再拆整数/小数两部分。
+  // 先舍入可避免 ".999..." 截断后整数部分出错。
+  //
+  Rounded = v + (0.5 / (double)Scale);
+  if (Rounded > 4294967295.0) {
+    _PrintString(pBufferDesc, Neg ? "-Inf" : "Inf", FieldWidth, FormatFlags);
+    return;
+  }
+  IntPart  = (unsigned)Rounded;
+  FracPart = (unsigned)((Rounded - (double)IntPart) * (double)Scale);
+  //
+  // 手工算出实际打印宽度，以便自行处理字段宽度补齐：
+  // 数值分两段输出，_PrintUnsigned 无法代劳。
+  //
+  Width = 1u;
+  for (i = IntPart; i >= 10u; i /= 10u) {
+    Width++;
+  }
+  if (Precision > 0u) {
+    Width += 1u + Precision;            // '.' plus the fractional digits
+  }
+  if ((Neg != 0u) || ((FormatFlags & FORMAT_FLAG_PRINT_SIGN) == FORMAT_FLAG_PRINT_SIGN)) {
+    Width++;
+  }
+  //
+  // 前导补齐（仅右对齐时）。
+  //
+  if ((FormatFlags & FORMAT_FLAG_LEFT_JUSTIFY) == 0u) {
+    char cPad = ((FormatFlags & FORMAT_FLAG_PAD_ZERO) == FORMAT_FLAG_PAD_ZERO) ? '0' : ' ';
+    //
+    // 用 '0' 补齐时，符号必须先于补的零输出，
+    // 否则 "%08.2f" 打印 -1.5 会变成 "0000-1.50"。
+    //
+    if (cPad == '0') {
+      if (Neg != 0u) {
+        _StoreChar(pBufferDesc, '-');
+      } else if ((FormatFlags & FORMAT_FLAG_PRINT_SIGN) == FORMAT_FLAG_PRINT_SIGN) {
+        _StoreChar(pBufferDesc, '+');
+      } else {
+
+      }
+      Neg         = 0u;
+      FormatFlags = FormatFlags & ~FORMAT_FLAG_PRINT_SIGN;
+    }
+    while ((Width < FieldWidth) && (pBufferDesc->ReturnValue >= 0)) {
+      _StoreChar(pBufferDesc, cPad);
+      FieldWidth--;
+    }
+  }
+  //
+  // 符号位。
+  //
+  if (Neg != 0u) {
+    _StoreChar(pBufferDesc, '-');
+  } else if ((FormatFlags & FORMAT_FLAG_PRINT_SIGN) == FORMAT_FLAG_PRINT_SIGN) {
+    _StoreChar(pBufferDesc, '+');
+  } else {
+
+  }
+  //
+  // 先整数部分，再小数部分（按精度高位补零）。
+  //
+  _PrintUnsigned(pBufferDesc, IntPart, 10u, 0u, 0u, 0u);
+  if (Precision > 0u) {
+    _StoreChar(pBufferDesc, '.');
+    _PrintUnsigned(pBufferDesc, FracPart, 10u, Precision, 0u, 0u);
+  }
+  //
+  // 尾部补齐（左对齐时）。
+  //
+  if ((FormatFlags & FORMAT_FLAG_LEFT_JUSTIFY) == FORMAT_FLAG_LEFT_JUSTIFY) {
+    while ((Width < FieldWidth) && (pBufferDesc->ReturnValue >= 0)) {
+      _StoreChar(pBufferDesc, ' ');
+      FieldWidth--;
+    }
+  }
+}
+
+/*********************************************************************
+*
 *       Public code
 *
 **********************************************************************
@@ -449,6 +611,17 @@ int SEGGER_RTT_vprintf(unsigned BufferIndex, const char * sFormat, va_list * pPa
             _StoreChar(&BufferDesc, c);
             Precision--;
           } while (BufferDesc.ReturnValue >= 0);
+        }
+        break;
+      case 'f':
+      case 'F':
+        {
+          //
+          // 变参传递中 float 会被提升为 double，
+          // 所以即使调用方传的是 float，这里也必须按 double 取。
+          //
+          double d = va_arg(*pParamList, double);
+          _PrintFloat(&BufferDesc, d, (PrecisionSet != 0) ? Precision : 6u, FieldWidth, FormatFlags);
         }
         break;
       case 'p':

@@ -1,13 +1,92 @@
 #include "vofa_rtt.h"
-#include <math.h>
-#include <string.h>//memcpy
+#include <math.h>//sinf/cosf/isfinite
 #include "main.h"//HAL_GetTick
 
-/* 单帧最大字节数：每通道 4 字节小端 float，加 4 字节帧尾 */
-#define VOFA_FRAME_MAX      (VOFA_CH_MAX * 4 + 4)
+/* 单帧最大字节数：每通道最多 VOFA_NUM_MAX 字节，通道间 1 字节逗号，末尾 1 字节 '\n' */
+#define VOFA_FRAME_MAX      (VOFA_CH_MAX * (VOFA_NUM_MAX + 1) + 1)
 
-/* JustFloat 帧尾：小端 0x7F800000(+inf)，VOFA+ 以此切分帧边界 */
-static const uint8_t VOFA_FrameTail[4] = {0x00, 0x00, 0x80, 0x7F};
+/* 10^VOFA_DECIMALS，用于把小数部分整体搬到整数域再逐位输出 */
+static uint32_t VOFA_Pow10(unsigned n)
+{
+	uint32_t p = 1u;
+
+	while (n--)
+	{
+		p *= 10u;
+	}
+
+	return p;
+}
+
+/**
+ * @brief 把 float 转成定点十进制 ASCII，写入 buf
+ * @param buf 输出缓冲，需至少 VOFA_NUM_MAX 字节，不追加结束符
+ * @param v   待转换的值
+ * @return    实际写入的字节数
+ * @note  只做定点转换，不支持科学计数法：VOFA+ 波形观察的量程有限，
+ *        定点足够且避免引入 C 库 sprintf（体积大且可能不可重入）。
+ *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
+ */
+static unsigned VOFA_FloatToStr(char *buf, float v)
+{
+	const uint32_t scale = VOFA_Pow10(VOFA_DECIMALS);
+	unsigned len = 0;
+	uint32_t ipart;
+	uint32_t fpart;
+	uint32_t scaled;
+	char     rev[12];
+	unsigned n = 0;
+
+	/*NaN/Inf 无法定点表示，输出 0 保持帧结构完整*/
+	if (!isfinite(v))
+	{
+		buf[len++] = '0';
+		return len;
+	}
+
+	if (v < 0.0f)
+	{
+		buf[len++] = '-';
+		v = -v;
+	}
+
+	/*四舍五入到目标小数位，再拆成整数/小数两段；
+	  先做饱和再转 uint32，避免超量程时的未定义行为*/
+	if (v > (float)(0xFFFFFFFFu / scale))
+	{
+		v = (float)(0xFFFFFFFFu / scale);
+	}
+	scaled = (uint32_t)(v * (float)scale + 0.5f);
+	ipart  = scaled / scale;
+	fpart  = scaled % scale;
+
+	/*整数部分：先逆序取十进制位，再翻转写出*/
+	do
+	{
+		rev[n++] = (char)('0' + (ipart % 10u));
+		ipart /= 10u;
+	} while (ipart);
+
+	while (n--)
+	{
+		buf[len++] = rev[n];
+	}
+
+	/*小数部分：定长 VOFA_DECIMALS 位，高位补零（scale/10 起逐位下降）*/
+	if (VOFA_DECIMALS > 0)
+	{
+		uint32_t div = scale / 10u;
+
+		buf[len++] = '.';
+		while (div)
+		{
+			buf[len++] = (char)('0' + (fpart / div) % 10u);
+			div /= 10u;
+		}
+	}
+
+	return len;
+}
 
 /**
  * @brief VOFA+ RTT 初始化
@@ -23,28 +102,34 @@ void VOFA_RTT_Init(void)
 }
 
 /**
- * @brief 推送一帧 JustFloat 二进制数据
+ * @brief 推送一帧 FireWater 文本数据
  * @param data   指向 ch_num 个 float
  * @param ch_num 通道数，需 <= VOFA_CH_MAX
- * @note  整帧一次性写入，避免多次调用 RTT_Write 导致帧被其他输出割裂。
- *        本芯片是小端序，float 内存布局与 JustFloat 要求一致，可直接 memcpy。
+ * @note  帧格式 "v0,v1,...,vn\n"，通道间逗号分隔，'\n' 为帧结束符。
+ *        整帧一次性写入，避免多次调用 RTT_Write 导致帧被其他输出割裂——
+ *        FireWater 是文本协议，帧被割裂会直接让上位机解析错行。
  */
 void VOFA_RTT_Send(const float *data, unsigned ch_num)
 {
-	uint8_t  frame[VOFA_FRAME_MAX];
+	char     frame[VOFA_FRAME_MAX];
 	unsigned len = 0;
+	unsigned i;
 
 	if ((data == 0) || (ch_num == 0) || (ch_num > VOFA_CH_MAX))
 	{
 		return;
 	}
 
-	/*data 由调用方保证是 float 数组，此处按字节整体拷贝，不做任何数值转换*/
-	memcpy(&frame[len], data, ch_num * 4u);
-	len += ch_num * 4u;
+	for (i = 0; i < ch_num; i++)
+	{
+		if (i)
+		{
+			frame[len++] = ',';
+		}
+		len += VOFA_FloatToStr(&frame[len], data[i]);
+	}
 
-	memcpy(&frame[len], VOFA_FrameTail, sizeof(VOFA_FrameTail));
-	len += sizeof(VOFA_FrameTail);
+	frame[len++] = '\n';
 
 	SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
 }

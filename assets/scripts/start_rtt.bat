@@ -3,13 +3,15 @@ title J-Link RTT Server for VOFA
 
 REM ===========================================================================
 REM  Start J-Link Commander, RTT telnet server listens on 127.0.0.1:19021
-REM  VOFA+ : TCP Client / 127.0.0.1 / 19021 / no handshake / JustFloat
+REM  VOFA+ : TCP Client / 127.0.0.1 / 19021 / no handshake / FireWater
 REM
 REM  ASCII only on purpose. GBK comments broke CMD parsing before.
 REM ===========================================================================
 
 REM ---- target params ----
-set DEVICE=STM32G070RB
+REM  CHANGE THIS to your own MCU. Use the SEGGER device name
+REM  (usually the part number without package/temp suffix).
+set DEVICE=STM32F407VE
 set INTERFACE=SWD
 set SPEED=4000
 set RTTPORT=19021
@@ -52,7 +54,7 @@ ping -n 2 127.0.0.1 >nul 2>&1
 
 echo  After "Connected", open VOFA+ :
 echo     Data source = TCP Client   IP = 127.0.0.1   Port = %RTTPORT%
-echo     Handshake   = none         Protocol = JustFloat
+echo     Handshake   = none         Protocol = FireWater
 echo.
 echo  If port 19021 was busy, J-Link falls back to 19022 / 19023 ...
 echo  Check the J-Link banner below, or run in another cmd:

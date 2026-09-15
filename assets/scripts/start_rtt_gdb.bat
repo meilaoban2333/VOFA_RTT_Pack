@@ -3,7 +3,7 @@ title J-Link GDB Server RTT for VOFA
 
 REM ===========================================================================
 REM  Start J-Link GDB Server, RTT telnet server listens on 127.0.0.1:19021
-REM  VOFA+ : TCP Client / 127.0.0.1 / 19021 / no handshake / JustFloat
+REM  VOFA+ : TCP Client / 127.0.0.1 / 19021 / no handshake / FireWater
 REM
 REM  Why this is a TWO STAGE script:
 REM  GDB Server has no option to resume a halted core on its own. Per SEGGER
@@ -20,7 +20,9 @@ REM  ASCII only on purpose. GBK comments broke CMD parsing before.
 REM ===========================================================================
 
 REM ---- target params ----
-set DEVICE=STM32G070RB
+REM  CHANGE THIS to your own MCU. Use the SEGGER device name
+REM  (usually the part number without package/temp suffix).
+set DEVICE=STM32F407VE
 set INTERFACE=SWD
 set SPEED=4000
 set RTTPORT=19021
@@ -82,7 +84,7 @@ echo  [2/2] Starting GDB Server (RTT only, core left running) ...
 echo.
 echo  Open VOFA+ :
 echo     Data source = TCP Client   IP = 127.0.0.1   Port = %RTTPORT%
-echo     Handshake   = none         Protocol = JustFloat
+echo     Handshake   = none         Protocol = FireWater
 echo.
 echo  "Waiting for GDB connection" is normal and expected. RTT already
 echo  streams at that point, you do NOT need to attach any GDB client.

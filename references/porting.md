@@ -2,7 +2,13 @@
 
 三种构建方式配置 RTT 的具体改动。每种只需要做两件事：**3 个 .c 加入编译** + **RTT 目录加入 include 路径**。
 
-以下均假设 RTT 源码放在工程的 `User/RTT/`，按实际路径调整。
+必加的三个 .c：`SEGGER_RTT.c`、`SEGGER_RTT_printf.c`、`vofa_rtt.c`。
+
+用了可选的下行命令示例（`assets/examples/log_demo.c/.h`）时，再多加一个 `log_demo.c`，
+并把它所在目录也加进 include 路径。下面各节用「可选」标出这部分，不用就跳过。
+
+以下均假设 RTT 源码放在工程的 `User/RTT/`，`log_demo.c/.h` 放 `User/RTT/` 同目录，
+按实际路径调整。
 
 ---
 
@@ -15,6 +21,7 @@
    - `User/RTT/SEGGER_RTT.c`
    - `User/RTT/SEGGER_RTT_printf.c`
    - `User/RTT/vofa_rtt.c`
+   - `User/RTT/log_demo.c`（可选，用下行命令示例时才加）
 
 2. **加头文件路径**：`Options for Target`（魔术棒）→ `C/C++` 标签 →
    `Include Paths` 右侧 `...` → 新增一行 `..\User\RTT`
@@ -51,6 +58,12 @@
       <FileType>1</FileType>
       <FilePath>..\User\RTT\vofa_rtt.c</FilePath>
     </File>
+    <!-- 可选：下行命令示例，不用就删掉这一段 -->
+    <File>
+      <FileName>log_demo.c</FileName>
+      <FileType>1</FileType>
+      <FilePath>..\User\RTT\log_demo.c</FilePath>
+    </File>
   </Files>
 </Group>
 ```
@@ -70,12 +83,13 @@ AC5 已停止维护，新工程用 AC6。
 ### 图形界面操作
 
 1. **加源文件**：EIDE 项目资源管理器 → `Project Resources` 右键 → `New Virtual Folder`，
-   建 `RTT` 文件夹 → 右键该文件夹 → `Add Existing Source Files`，选三个 .c。
+   建 `RTT` 文件夹 → 右键该文件夹 → `Add Existing Source Files`，选三个 .c
+   （用下行命令示例时再加 `log_demo.c`）。
 
 2. **加头文件路径**：`Project Attributes` → `Include Path` → `+` → 选 `User/RTT` 目录。
 
 3. **烧录器改 JLink**：`Flasher Configurations` → `Uploader` 选 `JLink` →
-   展开设置，`Cpu Name` 填器件名（如 `STM32G070RB`），`Vendor` 填厂商（如 `ST`）。
+   展开设置，`Cpu Name` 填器件名（如 `STM32F407VE`），`Vendor` 填厂商（如 `ST`）。
 
 ### 直接改 .eide/eide.yml
 
@@ -87,6 +101,7 @@ AC5 已停止维护，新工程用 AC6。
         - path: User/RTT/SEGGER_RTT.c
         - path: User/RTT/SEGGER_RTT_printf.c
         - path: User/RTT/vofa_rtt.c
+        - path: User/RTT/log_demo.c    # 可选，用下行命令示例时才加
       folders: []
 ```
 
@@ -100,7 +115,7 @@ AC5 已停止维护，新工程用 AC6。
 
 ```yaml
         cpuInfo:
-          cpuName: STM32G070RB    # 改成实际器件
+          cpuName: STM32F407VE    # 改成实际器件
           vendor: ST
     uploader: JLink               # 原来可能是 OpenOCD
 ```
@@ -122,6 +137,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/RTT/SEGGER_RTT.c
     User/RTT/SEGGER_RTT_printf.c
     User/RTT/vofa_rtt.c
+    # User/RTT/log_demo.c    # 可选：下行命令示例，用时取消注释
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -139,6 +155,7 @@ list(APPEND SOURCES
     ${CMAKE_SOURCE_DIR}/User/RTT/SEGGER_RTT.c
     ${CMAKE_SOURCE_DIR}/User/RTT/SEGGER_RTT_printf.c
     ${CMAKE_SOURCE_DIR}/User/RTT/vofa_rtt.c
+    # ${CMAKE_SOURCE_DIR}/User/RTT/log_demo.c    # 可选
 )
 include_directories(${CMAKE_SOURCE_DIR}/User/RTT)
 ```
@@ -153,6 +170,8 @@ User/RTT/SEGGER_RTT.c \
 User/RTT/SEGGER_RTT_printf.c \
 User/RTT/vofa_rtt.c
 ```
+
+用下行命令示例时再追加一行 `User/RTT/log_demo.c \`（注意行尾续行反斜杠的位置）。
 
 `C_INCLUDES` 追加：
 
@@ -184,9 +203,24 @@ STM32CubeIDE 是 Eclipse 内核，不用 CMake 时：
 
 1. **编译过**：无 `undefined reference to SEGGER_RTT_Write` 之类错误。
    报这个错说明 `SEGGER_RTT.c` 没参与编译，回查步骤 1。
+   报 `undefined reference to SEGGER_RTT_printf` 则是 `SEGGER_RTT_printf.c` 漏了
+   （只用波形不用 `LOG()` 时也必须加，`vofa_rtt.h` 的 `LOG` 宏引用了它）。
 2. **头文件找得到**：无 `vofa_rtt.h: No such file`。报错说明 include 路径没配对。
 3. **烧录后跑 `start_rtt.bat`**：看到 `Connected` 且没有 `Cannot connect`。
    连不上先查 bat 里 `DEVICE` 器件名。
-4. **VOFA+ 连上 19021**：能看到数据流进来。没数据先在 `J-Link>` 敲 `g`。
-5. **看到正弦+余弦两条波**：`VOFA_RTT_TestLoop()` 的自检波形，1Hz、幅值 100、相差 90°。
+4. **先用文本确认数据**（FireWater 的好处，比直接连 VOFA+ 更容易定位）：
+   在 J-Link Commander 里敲 `rtt read 0`，或开 RTT Viewer 连上，
+   应该能看到形如 `12.345,-6.789` 的**可读文本**逐行刷出来。
+   - 一个字符都没有 → 内核被 halt，在 `J-Link>` 敲 `g` 放行
+   - 有数据但是乱码 → 发送端不是 FireWater，核对 `vofa_rtt.c` 是不是被改成了二进制
+5. **VOFA+ 连上 19021**：数据接口 TCP 客户端，协议选 **FireWater**。
+6. **看到正弦+余弦两条波**：`VOFA_RTT_TestLoop()` 的自检波形，1Hz、幅值 100、相差 90°。
    看到这个说明整条链路通了，把 `TestLoop` 换成自己的变量即可。
+7. **（可选）验 `LOG()`**：随便打一句 `LOG("hello %.2f
+", 1.5f)`，
+   RTT Viewer 里应出现 `hello 1.50`。打出 `hello %f` 原样说明用的不是本包改过的
+   `SEGGER_RTT_printf.c`（SEGGER 原版不支持 `%f`），检查是否被工程里的旧版覆盖。
+   **验完记得关掉，LOG 文本会污染 FireWater 波形数据流。**
+8. **（可选）验下行命令**：确认 `LogTask()` 被周期调用后，
+   在 RTT Viewer 输入行发 `AT+1` 加回车，对应观察项的曲线应该出现；再发一次应消失。
+   没反应先查命令有没有带换行符。
