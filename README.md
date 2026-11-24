@@ -1,5 +1,7 @@
 # VOFA_RTT_Pack
 
+**中文** | [English](README.en.md)
+
 SEGGER RTT + VOFA+ 实时波形输出的自包含移植包。经 J-Link、CMSIS-DAP（DAPLink，v1/v2）或 ST-Link
 把 MCU 内部变量推给 VOFA+，不占用串口，缓冲满自动丢帧不阻塞主循环。换调试器不用改固件。
 
@@ -39,6 +41,7 @@ SEGGER RTT + VOFA+ 实时波形输出的自包含移植包。经 J-Link、CMSIS-
 VOFA_RTT_Pack/
 ├── SKILL.md                 # Claude Code 技能入口，让 AI 按流程自动移植
 ├── README.md                # 本文件，人工移植看这个
+├── README.en.md             # 英文版 README
 ├── assets/
 │   ├── RTT/                 # 直接拷进工程的六个源文件
 │   │   ├── SEGGER_RTT.c/.h
