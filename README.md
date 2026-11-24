@@ -61,6 +61,18 @@ VOFA_RTT_Pack/
     └── porting.md           # Keil / EIDE / CMake 构建配置、下载配置
 ```
 
+## 配置项一览
+
+| 改哪里 | 管什么 | 什么时候要改 | 详见 |
+|--------|--------|--------------|------|
+| `start_rtt.bat` 开头的 `set` 行 | 调试器类型、芯片、OpenOCD 目标与 RAM 范围、编译即下载、端口、复位、工具路径 | 每个新工程都要核对 | 第 3 步 |
+| `vofa_rtt.h` | 协议、最大通道数、小数位、自检波形 | 换协议、加通道 | 「接口」 |
+| `SEGGER_RTT_Conf.h` | 缓冲区大小、通道数、缓冲满时的处理方式、临界区屏蔽优先级、内存段 | RAM 紧张、用 RTOS、H7 等带缓存的芯片 | 「RTT 底层配置」 |
+| `log_demo.h` / `log_demo.c`（可选） | 观察项编号表、全开时的通道数、命令行长度 | 用下行命令时 | 「可选：下行命令」 |
+| VOFA+ 界面 | 数据接口、IP、端口、数据格式 | 每次连接 | 第 5 步 |
+
+脚本里还有一些写死的参数（内部端口、各种检测间隔等），见「脚本的命令行与固定参数」。
+
 ## 选哪个协议
 
 在 `vofa_rtt.h` 改这一行：
@@ -200,6 +212,35 @@ VOFA+ 里配：
   中间有短暂重叠，**不推荐**，用编译即下载或"Keil F8 交给脚本"。
 - **Keil 调试**（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口按 `P`，调试完再按 `P`。
 
+## 脚本的命令行与固定参数
+
+两种运行方式：
+
+| 用法 | 作用 |
+|------|------|
+| 双击，或命令行 `start_rtt.bat` | 启动 RTT 服务（自动识别调试器、转发、看门狗、编译即下载） |
+| `start_rtt.bat flash <固件文件>` | 下载一个固件。支持 `.axf` / `.elf` / `.hex`；`.bin` 不带地址，不支持。脚本正在运行时经它下载、RTT 接着推；没运行时临时起一个 OpenOCD 下载完退出。成功返回 0、失败返回 1（Keil 外部工具据此判断成败）。J-Link 下不支持，直接用 IDE 下载 |
+
+服务窗口里的按键：`P` 暂停并释放探针 / 再按恢复，`R` 立即重连，`Q` 退出。
+
+下面这些是写死在脚本后半段（PowerShell 部分）里的，一般不用动，要改就改那里：
+
+| 项 | 值 | 说明 |
+|----|-----|------|
+| 内部端口 | `RTTPORT+10`（默认 19031） | 底层工具的 RTT 服务，脚本转发到 `RTTPORT` |
+| OpenOCD 端口 | GDB 3333、telnet 4444、Tcl 6666 | `flash` 模式经 Tcl 6666 找正在运行的脚本 |
+| 看门狗间隔 | 1.5 秒 | 检查探针是否在位、底层工具是否退出 |
+| 底层工具重启等待 | 1 秒 | 底层工具意外退出后多久重启 |
+| 让出检测 / 接回等待 | 100 毫秒 / 2 秒 | 多久查一次有没有别的下载工具；对方结束后空闲多久再接回 |
+| 控制块重试 | 1 秒 | OpenOCD 没找到控制块时多久重试一次 |
+| OpenOCD RTT 轮询 | 10 毫秒 | OpenOCD 自身默认 100 毫秒太慢 |
+| 编译输出稳定时间 | 1 秒 | `.axf` / `.elf` 1 秒内没再变化才下载 |
+| 下载记录 | `%TEMP%\start_rtt_<RTTPORT>.last` | 最后一次经脚本烧进去的固件哈希，用来跳过重复下载 |
+| 底层工具日志 | `%TEMP%\start_rtt_<进程号>.*.log` | 脚本退出时删除 |
+
+**一台电脑同时只能开一个 `start_rtt.bat`**：启动时会结束其他 `JLink.exe` / `openocd.exe`，
+OpenOCD 的 Tcl 端口也是固定的，所以不支持同时接多块板各开一个脚本。
+
 ## 接口
 
 ```c
@@ -223,6 +264,28 @@ LOG("fmt", ...);                                        // printf 风格文本�
 | `VOFA_DECIMALS` | 3 | 每通道小数位数，调大帧变长。**仅 FireWater 用到** |
 | `VOFA_TEST_PERIOD_MS` | 10 | 自检波形周期，即采样率 100Hz |
 | `VOFA_SINE_FREQ_HZ` / `VOFA_SINE_AMP` | 1.0 / 100 | 自检正弦的频率和幅值 |
+
+另有两个宏**不要改**：`VOFA_RTT_BUF_IDX`（固定 0，脚本只转发 0 号通道）、`VOFA_NUM_MAX`（由 `VOFA_DECIMALS` 自动算出）。
+
+`vofa_rtt.h` 里的宏没有 `#ifndef` 保护，**只能直接改文件**，不能在工程的预定义宏里覆盖。
+
+## RTT 底层配置（SEGGER_RTT_Conf.h）
+
+这些项都包在 `#ifndef` 里，可以直接改文件，也可以在工程的预定义宏里定义来覆盖
+（Keil：`Options for Target` → `C/C++` → `Define`；GCC：`-DBUFFER_SIZE_UP=4096`），这样以后换新版文件也不丢配置。
+
+| 宏 | 本包默认 | 说明 |
+|----|----------|------|
+| `BUFFER_SIZE_UP` | 2048 | 0 号上行缓冲，波形和 `LOG()` 都走这里。RAM 紧张可降到 512 / 256，代价是高速发送时更容易丢帧；CMSIS-DAP 读得比 J-Link 慢，高采样率多通道时可以调大 |
+| `BUFFER_SIZE_DOWN` | 16 | 0 号下行缓冲，收下行命令。命令比它长也没关系，`log_demo` 会跨次拼行 |
+| `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | 上行通道数，只用 0 号。想把文本挪到 1 号通道时改成 2（脚本只转发 0 号，1 号要用 J-Link RTT Viewer 看） |
+| `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | 下行通道数，只用 0 号 |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | `LOG()` 用的栈上缓冲，写满自动分段发送。调大一次发得更完整，但占更多栈 |
+| `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | 缓冲满时怎么办：`NO_BLOCK_SKIP` 整帧丢弃（推荐）；`NO_BLOCK_TRIM` 能写多少写多少，会产生半帧，波形协议别用；`BLOCK_IF_FIFO_FULL` 等到有空间，没开脚本时会卡死主循环。**注意 `VOFA_RTT_Init()` 会把 0 号通道强制设成 `NO_BLOCK_SKIP`，改这个宏对 0 号不起作用**，真要改得改 `vofa_rtt.c` 里那一行 |
+| `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | 仅 M3/M4/M7/M33：写 RTT 时用 `BASEPRI` 屏蔽优先级寄存器值 ≥ 它的中断（STM32 的 4 位优先级下即优先级 2~15）。优先级 0、1 的中断不会被屏蔽，**这些中断里不要调用 RTT**。用 FreeRTOS 时一般设成 `configMAX_SYSCALL_INTERRUPT_PRIORITY`。M0/M0+ 没有这项，直接关全局中断 |
+| `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = 用逐字节拷贝代替 `memcpy`，数据量很小时略快，一般不用动 |
+| `SEGGER_RTT_SECTION` / `SEGGER_RTT_BUFFER_SECTION` | 未定义 | 把控制块 / 缓冲放进指定的链接段。用途：固定 `_SEGGER_RTT` 的地址（OpenOCD 的 `RAM_START` 就能填死）；H7 等带 D-Cache 的芯片放进 DTCM 或不可缓存区，避免调试器读到 Cache 里没写回的旧数据 |
+| `SEGGER_RTT_CPU_CACHE_LINE_SIZE` / `SEGGER_RTT_UNCACHED_OFF` | 注释掉 | 面向 Cortex-A 等带缓存的系统，Cortex-M 一般不用 |
 
 ## LOG() 文本打印（仅 FireWater）
 
@@ -265,6 +328,13 @@ AT+0\n      全部关闭
 
 移植时改三处：`log_demo.h` 的 `LOG_ID_xxx` 表、`log_demo.c` 里 `LogPrint()` 的取值代码、
 `LOG_CH_MAX`（须 ≤ `VOFA_CH_MAX`）。然后周期调用 `LogTask()`，建议 20~50ms 一次。
+
+| 项 | 位置 | 默认 | 说明 |
+|----|------|------|------|
+| `LOG_ID_xxx` | `log_demo.h` | 1~4 是示例 | 观察项编号。**有效范围 1~31**（32 位掩码，每号占 1 bit，超出的号被忽略），0 固定表示全部关闭 |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，否则整帧被丢弃 |
+| `LOG_LINE_MAX` | `log_demo.c` | 32 | 一条命令最多多少字符，超长的整条命令作废 |
+| 命令格式 | `log_demo.c` | `AT+` | 前缀固定为 `AT+`，号之间用逗号、空格等任意非数字字符分隔，以回车或换行结束 |
 
 **两种协议都能用，本文件不用改**：输出调的是 `VOFA_RTT_Send()`，帧格式自动跟随
 `VOFA_PROTOCOL`；命令走下行通道，与上行波形协议无关，JustFloat 下 AT 命令照常好使。

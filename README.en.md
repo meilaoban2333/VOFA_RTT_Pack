@@ -66,6 +66,19 @@ VOFA_RTT_Pack/
     └── porting.md           # Keil / EIDE / CMake build and download setup (Chinese)
 ```
 
+## Settings at a glance
+
+| Where | What it controls | When to change it | Details |
+|-------|------------------|-------------------|---------|
+| The `set` lines at the top of `start_rtt.bat` | Probe type, chip, OpenOCD target and RAM range, build-and-download, ports, reset, tool paths | Check for every new project | Step 3 |
+| `vofa_rtt.h` | Protocol, max channels, decimals, self-test waveform | Switching protocol, adding channels | "API" |
+| `SEGGER_RTT_Conf.h` | Buffer sizes, channel counts, what happens when the buffer is full, critical-section mask priority, memory sections | Tight RAM, an RTOS, chips with caches such as the H7 | "Low-level RTT settings" |
+| `log_demo.h` / `log_demo.c` (optional) | Watched-item ID table, channel count with everything on, command line length | When using downlink commands | "Optional: downlink commands" |
+| VOFA+ UI | Data interface, IP, port, data format | Every connection | Step 5 |
+
+The script also has some fixed values (internal port, check intervals and so on); see "Script command line
+and fixed parameters".
+
 ## Which protocol
 
 Change this line in `vofa_rtt.h`:
@@ -216,6 +229,37 @@ Notes:
 - **Debugging in Keil** (Ctrl+F5) still uses Keil's own driver. Press `P` in the script window before
   debugging and `P` again afterwards.
 
+## Script command line and fixed parameters
+
+Two ways to run it:
+
+| Usage | What it does |
+|-------|--------------|
+| Double-click, or `start_rtt.bat` on the command line | Starts the RTT server (probe detection, relay, watchdog, build-and-download) |
+| `start_rtt.bat flash <firmware file>` | Downloads one firmware image. `.axf` / `.elf` / `.hex` are supported; `.bin` has no address and is not. If the script is running, the download goes through it and RTT keeps streaming; otherwise a temporary OpenOCD downloads and exits. Returns 0 on success and 1 on failure (Keil's external tool uses this). Not supported with J-Link; download from the IDE instead |
+
+Keys in the server window: `P` pauses and releases the probe / `P` again resumes, `R` reconnects now,
+`Q` quits.
+
+These values are fixed in the second (PowerShell) half of the script. They rarely need changing; edit them
+there if you must:
+
+| Item | Value | Meaning |
+|------|-------|---------|
+| Internal port | `RTTPORT+10` (19031 by default) | The backend's RTT service; the script relays it to `RTTPORT` |
+| OpenOCD ports | GDB 3333, telnet 4444, Tcl 6666 | `flash` mode finds the running script through Tcl 6666 |
+| Watchdog interval | 1.5 s | Checks that the probe is present and the backend is still running |
+| Backend restart delay | 1 s | How long after an unexpected backend exit it is restarted |
+| Yield check / resume delay | 100 ms / 2 s | How often to look for other download tools; how long the probe must be idle before taking it back |
+| Control block retry | 1 s | How often to retry when OpenOCD has not found the control block |
+| OpenOCD RTT polling | 10 ms | OpenOCD's own default of 100 ms is too slow |
+| Build output settle time | 1 s | An `.axf` / `.elf` is downloaded only after it has not changed for 1 s |
+| Download record | `%TEMP%\start_rtt_<RTTPORT>.last` | Hash of the image last programmed through the script, used to skip repeat downloads |
+| Backend logs | `%TEMP%\start_rtt_<process id>.*.log` | Deleted when the script exits |
+
+**Only one `start_rtt.bat` can run per PC**: at startup it ends other `JLink.exe` / `openocd.exe`
+processes, and the OpenOCD Tcl port is fixed, so several boards with one script each are not supported.
+
 ## API
 
 ```c
@@ -239,6 +283,31 @@ Tunable in `vofa_rtt.h`:
 | `VOFA_DECIMALS` | 3 | Decimals per channel; more makes frames longer. **FireWater only** |
 | `VOFA_TEST_PERIOD_MS` | 10 | Self-test period, i.e. 100 Hz sample rate |
 | `VOFA_SINE_FREQ_HZ` / `VOFA_SINE_AMP` | 1.0 / 100 | Frequency and amplitude of the self-test sine |
+
+Two more macros must **not** be changed: `VOFA_RTT_BUF_IDX` (fixed at 0, the script only relays channel 0)
+and `VOFA_NUM_MAX` (derived from `VOFA_DECIMALS`).
+
+The macros in `vofa_rtt.h` have no `#ifndef` guard, so **edit the file itself**; they cannot be overridden
+with project-wide defines.
+
+## Low-level RTT settings (SEGGER_RTT_Conf.h)
+
+All of these are wrapped in `#ifndef`, so you can edit the file or override them with project-wide defines
+(Keil: `Options for Target` → `C/C++` → `Define`; GCC: `-DBUFFER_SIZE_UP=4096`), which keeps your settings
+when you replace the file with a newer version.
+
+| Macro | Default in this pack | Meaning |
+|-------|----------------------|---------|
+| `BUFFER_SIZE_UP` | 2048 | Up-buffer 0, carrying both the waveform and `LOG()`. With tight RAM, 512 / 256 works at the cost of more dropped frames at high rates; CMSIS-DAP reads slower than J-Link, so raise it for high sample rates with many channels |
+| `BUFFER_SIZE_DOWN` | 16 | Down-buffer 0, receiving downlink commands. Longer commands are fine; `log_demo` assembles the line across reads |
+| `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | Number of up-channels; only channel 0 is used. Set 2 to move text to channel 1 (the script only relays channel 0, so view channel 1 in J-Link RTT Viewer) |
+| `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | Number of down-channels; only channel 0 is used |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | Stack buffer used by `LOG()`; flushed in pieces when full. Larger means more complete writes but more stack |
+| `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | What happens when the buffer is full: `NO_BLOCK_SKIP` drops the whole frame (recommended); `NO_BLOCK_TRIM` writes what fits and produces half frames, so do not use it with a waveform protocol; `BLOCK_IF_FIFO_FULL` waits for space and hangs the main loop when the script is not running. **Note that `VOFA_RTT_Init()` forces channel 0 to `NO_BLOCK_SKIP`, so this macro has no effect on channel 0**; change that line in `vofa_rtt.c` if you really need another mode |
+| `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | M3/M4/M7/M33 only: while writing RTT, `BASEPRI` masks interrupts whose priority register value is ≥ this (with STM32's 4 priority bits, priorities 2–15). Priority 0 and 1 interrupts are not masked, **so do not call RTT from them**. With FreeRTOS this is usually set to `configMAX_SYSCALL_INTERRUPT_PRIORITY`. M0/M0+ have no such setting and disable interrupts globally |
+| `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = copy byte by byte instead of `memcpy`, slightly faster for very small amounts; usually leave it |
+| `SEGGER_RTT_SECTION` / `SEGGER_RTT_BUFFER_SECTION` | not defined | Put the control block / buffers into a given linker section. Uses: fix the address of `_SEGGER_RTT` (so OpenOCD's `RAM_START` can be set exactly); on chips with a D-cache such as the H7, put them in DTCM or non-cacheable RAM so the debugger never reads stale data still sitting in the cache |
+| `SEGGER_RTT_CPU_CACHE_LINE_SIZE` / `SEGGER_RTT_UNCACHED_OFF` | commented out | For cached systems such as Cortex-A; usually not needed on Cortex-M |
 
 ## LOG() text printing (FireWater only)
 
@@ -286,6 +355,13 @@ AT+0\n      turn everything off
 When porting, change three things: the `LOG_ID_xxx` table in `log_demo.h`, the value-reading code in
 `LogPrint()` in `log_demo.c`, and `LOG_CH_MAX` (must be ≤ `VOFA_CH_MAX`). Then call `LogTask()`
 periodically, every 20–50 ms.
+
+| Item | Where | Default | Meaning |
+|------|-------|---------|---------|
+| `LOG_ID_xxx` | `log_demo.h` | 1–4 are examples | Watched-item IDs. **Valid range 1–31** (a 32-bit mask with one bit per ID; larger IDs are ignored); 0 always means "all off" |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX` or the whole frame is dropped |
+| `LOG_LINE_MAX` | `log_demo.c` | 32 | Maximum characters per command; a longer command is discarded entirely |
+| Command format | `log_demo.c` | `AT+` | The prefix is always `AT+`; IDs are separated by any non-digit character (comma, space, ...) and the line ends with CR or LF |
 
 **Works with both protocols without changes**: output goes through `VOFA_RTT_Send()`, so the frame format
 follows `VOFA_PROTOCOL`; commands use the downlink channel, which is independent of the uplink protocol,
