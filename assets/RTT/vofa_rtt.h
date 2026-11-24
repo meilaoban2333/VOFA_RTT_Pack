@@ -8,8 +8,10 @@
  *
  * 数据通路：
  *   MCU --SEGGER_RTT_Write--> RTT 0 号上行缓冲(RAM)
- *       --J-Link 经 SWD 后台读走--> RTT Telnet Server(127.0.0.1:19021) --> VOFA+
- *   注意 19021 端口固定绑定 0 号上行通道，所以本模块必须用通道 0，不能用 1。
+ *       --调试器经 SWD 后台读走--> 主机 RTT TCP 服务(127.0.0.1:19021) --> VOFA+
+ *   主机端由 scripts/start_rtt.bat 自动识别 J-Link / CMSIS-DAP / ST-Link 并转发到
+ *   19021，固件侧无差别。脚本统一读 0 号上行通道（J-Link 的 RTT 端口也固定绑 0 号），
+ *   所以本模块统一用通道 0，不能用 1。
  *
  * 支持两种 VOFA+ 协议，用下面的 VOFA_PROTOCOL 宏切换，默认 FireWater。
  * 切换后必须同步改 VOFA+ 上位机的"数据格式"设置，否则解析不出波形。
@@ -21,7 +23,7 @@
  *   握手数据   : 留空
  *   数据格式   : 与 VOFA_PROTOCOL 一致（FireWater 或 JustFloat）
  *
- * J-Link Commander 侧（必须先开 RTT 服务，否则 19021 不监听）：
+ * J-Link Commander 手动操作（start_rtt.bat 已自动完成，仅供手工排查参考）：
  *   J-Link>connect
  *   Device>STM32F407VE      <- 只填器件名，改成自己的芯片型号
  *   TIF>S
@@ -67,7 +69,7 @@
 /* 改这一行切换协议，记得同步改 VOFA+ 上位机的"数据格式" */
 #define VOFA_PROTOCOL           VOFA_PROTO_FIREWATER
 
-/* RTT 上行通道索引：RTT Telnet Server(19021) 固定绑 0 号通道，不可改 */
+/* RTT 上行通道索引：start_rtt.bat（J-Link / OpenOCD 后端）统一读 0 号通道，不可改 */
 #define VOFA_RTT_BUF_IDX        0
 /* 每帧最多几个通道（决定组帧栈缓冲大小），通道多时调大 */
 #define VOFA_CH_MAX             8

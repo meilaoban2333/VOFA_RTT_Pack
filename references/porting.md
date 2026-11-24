@@ -26,8 +26,10 @@
 2. **加头文件路径**：`Options for Target`（魔术棒）→ `C/C++` 标签 →
    `Include Paths` 右侧 `...` → 新增一行 `..\User\RTT`
 
-3. **调试器选 J-Link**：`Options for Target` → `Debug` 标签 →
-   右侧下拉选 `J-LINK / J-TRACE Cortex` → `Settings` 里 Port 选 `SW`
+3. **调试器按实际探针选**：`Options for Target` → `Debug` 标签 → 右侧下拉选
+   `J-LINK / J-TRACE Cortex` 或 `CMSIS-DAP Debugger` 或 `ST-Link Debugger` → `Settings` 里 Port 选 `SW`。
+   这里只影响 Keil 调试；RTT 采集由 `start_rtt.bat` 负责。CMSIS-DAP / ST-Link 下脚本占着探针，
+   **Keil 调试前在脚本窗口按 `P` 释放**；下载改按 F7 编译即下载，见下面"边读边下载"。J-Link 无此限制。
 
 ### 直接改 .uvprojx（脚本化移植时用）
 
@@ -76,6 +78,37 @@
 AC5(`__CC_ARM`) 和 AC6(ARMCLANG) 都支持，`SEGGER_RTT_Conf.h` 内部有对应分支自动选择。
 AC5 已停止维护，新工程用 AC6。
 
+### 边读边下载（CMSIS-DAP / ST-Link）
+
+J-Link 跳过本节：SEGGER 软件允许 Keil 和脚本同时用一个 J-Link，照常 F8 下载即可。
+
+CMSIS-DAP / ST-Link 同一时间只能有一个程序在用探针，脚本运行时 Keil 自带下载驱动打不开探针，
+硬抢还会让两边命令串话。
+
+**推荐：按 F7 就行（编译即下载，Keil 里什么都不用配）。** `start_rtt.bat` 放在工程根目录、`AUTOFLASH=1`
+（默认）时，脚本发现新的 `.axf` 写完就自动下载，波形接着推；内容没变的重复编译会跳过。
+`.axf` 在 `start_rtt.bat` 所在目录之外时，用 `FIRMWARE` 填它的路径。
+
+**可选：让 F8 也走脚本。** 习惯按 F8 的话，把 F8 下载交给脚本：
+
+1. `Options for Target` → `Utilities` 标签 → 选 `Use External Tool for Flash Programming`
+2. `Command`：点 `...` 选工程里 `start_rtt.bat` 的完整路径
+3. `Arguments`：`flash "#L"`（`#L` 是 Keil 的链接输出文件，即带完整路径的 `.axf`）
+4. **不勾** `Run Independent`（Keil 要等下载结束、拿返回码判断成败）
+
+之后 F8 的行为：脚本在运行 → 经脚本的 OpenOCD 下载、复位，波形接着推（实测断流约 0.5 秒）；
+脚本没运行 → 临时起一个 OpenOCD 下载完退出。也可以在命令行直接用：
+`start_rtt.bat flash "MDK-ARM\xxx\xxx.axf"`（`.axf` / `.elf` / `.hex` 都行，`.bin` 不带地址不支持）。
+
+`Utilities` 这几项在 `.uvprojx` 里对应 `<Utilities>` 下的字段，具体映射未核实，
+**脚本化移植时不要手写这几个 XML 字段**，在界面里配一次即可。
+
+配了外部工具后 F7 和 F8 都能下载。脚本记录着最后一次经它烧进去的固件，同一份固件再编译出来会跳过；
+如果 F8 会先自动编译，偶尔会重复烧录一次，不影响结果。
+
+**不要**在脚本运行时保留 Keil 自带的 CMSIS-DAP 下载驱动去按 F8：Keil 不起单独的进程，
+脚本只能在通信已经被打断后才让出探针。
+
 ---
 
 ## EIDE（VSCode 插件）
@@ -88,8 +121,17 @@ AC5 已停止维护，新工程用 AC6。
 
 2. **加头文件路径**：`Project Attributes` → `Include Path` → `+` → 选 `User/RTT` 目录。
 
-3. **烧录器改 JLink**：`Flasher Configurations` → `Uploader` 选 `JLink` →
+3. **烧录器按实际探针选**：J-Link 用户在 `Flasher Configurations` → `Uploader` 选 `JLink` →
    展开设置，`Cpu Name` 填器件名（如 `STM32F407VE`），`Vendor` 填厂商（如 `ST`）。
+   CMSIS-DAP / ST-Link 用户烧录器保持 `OpenOCD`（或 `pyOCD`）不用改，边看波形边下载有两种用法：
+   - **点 Build 就行**（编译即下载）：`start_rtt.bat` 放在工程根目录，EIDE 输出到 `build/<目标名>/`
+     的 `.elf` / `.axf` 写完后脚本自动下载。
+   - **照常点下载按钮**：脚本发现 EIDE 起了 `openocd` / `pyocd` 进程就让出探针，下载完 2 秒后自动接回。
+     对方刚启动的一瞬间偶尔报一次通信错误，重试即可。
+   - 也可以把 `Uploader` 选 `Custom`，`Flash Command Line` 填 `.\start_rtt.bat flash "${ExecutableName}.hex"`
+     （`${ExecutableName}` 是 EIDE 的输出文件路径不含扩展名；此配置未在 EIDE 里实测）。
+
+   RTT 采集用 `start_rtt.bat`，它会自动找到 EIDE 自带的 OpenOCD。
 
 ### 直接改 .eide/eide.yml
 
@@ -111,7 +153,7 @@ AC5 已停止维护，新工程用 AC6。
         - User/RTT
 ```
 
-烧录器部分（`targets.<目标名>.uploadConfig`）改成 JLink：
+J-Link 用户把烧录器部分（`targets.<目标名>.uploadConfig`）改成 JLink（CMSIS-DAP / ST-Link 用户跳过）：
 
 ```yaml
         cpuInfo:
@@ -181,11 +223,13 @@ C_INCLUDES += -IUser/RTT
 
 ### GCC 优化等级注意
 
-`-O2` / `-Os` 下 GCC 可能把 RTT 控制块 `_SEGGER_RTT` 优化掉或重排，导致 J-Link 搜不到。
+`-O2` / `-Os` 下 GCC 可能把 RTT 控制块 `_SEGGER_RTT` 优化掉或重排，导致调试器搜不到。
 该结构体在 `SEGGER_RTT.c` 里已标 `SEGGER_RTT_CB_ALIGN` 且被外部引用，正常不会被裁掉。
 若真的搜不到控制块，两个办法：
 - 链接时确认 `_SEGGER_RTT` 符号存在：`arm-none-eabi-nm build/xxx.elf | grep SEGGER_RTT`
-- 在 J-Link 里手动指定控制块地址：Commander 中 `setRTTAddr <地址>`，地址取上面 nm 的结果
+- 手动指定控制块地址，地址取上面 nm 的结果：
+  - J-Link：Commander 中 `setRTTAddr <地址>`
+  - CMSIS-DAP / ST-Link：`start_rtt.bat` 里 `RAM_START` 填该地址，`RAM_SIZE` 填 `0x100`
 
 ### CubeIDE 的图形操作
 
@@ -194,6 +238,30 @@ STM32CubeIDE 是 Eclipse 内核，不用 CMake 时：
    `Add...` → 填 `User/RTT`（勾 `Is a workspace path`）
 2. 源文件放进工程目录后，右键工程 `Refresh`(F5) 即可自动纳入编译；
    若目录被排除，右键该目录 → `Resource Configurations` → `Exclude from Build` 取消勾选
+
+---
+
+## 查 `_SEGGER_RTT` 地址（CMSIS-DAP / ST-Link 搜索范围用）
+
+CMSIS-DAP / ST-Link 走 OpenOCD，要知道控制块在哪段 RAM（J-Link 自己会找，不用管）。
+默认搜整块 SRAM 通常就够，换芯片或搜不到时，按构建方式查精确地址：
+
+| 构建方式 | 查法 |
+|----------|------|
+| Keil MDK | 在 Listing 输出目录找 `.map`（`Options for Target` → `Listing` → `Select Folder for Listings` 设定，CubeMX 工程一般是 `MDK-ARM/<工程名>/`），搜 `_SEGGER_RTT`，取 `Image Symbol Table` 里那行的地址 |
+| GCC / CMake / Makefile | `arm-none-eabi-nm build/xxx.elf \| grep _SEGGER_RTT`，或在 `.map` 里搜 `_SEGGER_RTT` |
+| EIDE | 编译输出目录 `build/<目标名>/` 下的 `.map`，搜 `_SEGGER_RTT` |
+
+常见芯片的整块 SRAM 范围（默认搜索用）：
+
+| 芯片 | `TARGETCFG`（OpenOCD） | `RAM_START` | `RAM_SIZE` |
+|------|------------------------|-------------|------------|
+| STM32G070RB | `target/stm32g0x.cfg` | `0x20000000` | `0x9000`（36KB） |
+| STM32F103C8 | `target/stm32f1x.cfg` | `0x20000000` | `0x5000`（20KB） |
+| STM32F407VE | `target/stm32f4x.cfg` | `0x20000000` | `0x20000`（128KB，不含 CCM） |
+
+H7 等有多块 RAM 的芯片，控制块所在的块取决于链接脚本（DTCM `0x20000000` 或 AXI SRAM
+`0x24000000`），**务必按 `.map` 查**，不要猜。
 
 ---
 
@@ -206,12 +274,15 @@ STM32CubeIDE 是 Eclipse 内核，不用 CMake 时：
    报 `undefined reference to SEGGER_RTT_printf` 则是 `SEGGER_RTT_printf.c` 漏了
    （只用波形不用 `LOG()` 时也必须加，`vofa_rtt.h` 的 `LOG` 宏引用了它）。
 2. **头文件找得到**：无 `vofa_rtt.h: No such file`。报错说明 include 路径没配对。
-3. **烧录后跑 `start_rtt.bat`**：看到 `Connected` 且没有 `Cannot connect`。
-   连不上先查 bat 里 `DEVICE` 器件名。
+3. **烧录后双击 `start_rtt.bat`**：看到 `probe: ...` 和 `RTT stream connected`。
+   - J-Link 反复 `backend exited`：先查 `DEVICE` 器件名。
+   - CMSIS-DAP / ST-Link 要看到 `RTT Control block found at 0x...`；反复 `No control block found`
+     先查 `RAM_START`/`RAM_SIZE`（见上文"查 `_SEGGER_RTT` 地址"）。
 4. **先用文本确认数据**（建议先保持默认的 FireWater 做这一步，比直接连 VOFA+
-   更容易定位问题）：在 J-Link Commander 里敲 `rtt read 0`，或开 RTT Viewer 连上，
-   应该能看到形如 `12.345,-6.789` 的**可读文本**逐行刷出来。
-   - 一个字符都没有 → 内核被 halt，在 `J-Link>` 敲 `g` 放行
+   更容易定位问题）：用任意 TCP 调试工具（网络调试助手等）连 `127.0.0.1:19021`，
+   应该能看到形如 `12.345,-6.789` 的**可读文本**逐行刷出来。脚本同一时间只服务一个客户端，
+   这时先断开 VOFA+（J-Link 下也可以用 RTT Viewer 看）。
+   - 一个字符都没有 → 看窗口标题的 KB/s：为 0 就按 `R` 重连（会放行被 halt 的内核），或设 `RESET=1`
    - 有数据但是乱码 → 当前跑的是 JustFloat（二进制流本来就不可读）。
      确认 `vofa_rtt.h` 的 `VOFA_PROTOCOL`；想用这一步定位就临时切回 FireWater。
 5. **VOFA+ 连上 19021**：数据接口 TCP 客户端，**协议选得和 `VOFA_PROTOCOL` 一致**
@@ -219,15 +290,18 @@ STM32CubeIDE 是 Eclipse 内核，不用 CMake 时：
    这一项配错是"链路都通就是没波形"的头号原因。
 6. **看到正弦+余弦两条波**：`VOFA_RTT_TestLoop()` 的自检波形，1Hz、幅值 100、相差 90°。
    看到这个说明整条链路通了，把 `TestLoop` 换成自己的变量即可。
-7. **（可选）切协议复验**：改 `vofa_rtt.h` 的 `VOFA_PROTOCOL`，重新编译烧录，
-   同时改 VOFA+ 的数据格式，波形应该和之前完全一致（JustFloat 精度更高，
+7. **（CMSIS-DAP / ST-Link）编译即下载**：脚本开着，把 `vofa_rtt.h` 里 `VOFA_SINE_FREQ_HZ` 改成 `2.0f`
+   后编译（Keil F7 / EIDE Build）。脚本窗口出现 `autoflash: ... changed, downloading ...` 和
+   `flash: done, RTT continues`，VOFA+ 里正弦波变成 2Hz，说明下载链路也通了，改回 `1.0f` 即可。
+8. **（可选）切协议复验**：改 `vofa_rtt.h` 的 `VOFA_PROTOCOL`，重新编译烧录（CMSIS-DAP / ST-Link 下
+   编译完会自动下载），同时改 VOFA+ 的数据格式，波形应该和之前完全一致（JustFloat 精度更高，
    小数位不再被截断）。波形消失就是两边协议没对上。
-8. **（可选）验 `LOG()`**：**仅 FireWater 下有效**。随便打一句
-   `LOG("hello %.2f\n", 1.5f)`，RTT Viewer 里应出现 `hello 1.50`。
+9. **（可选）验 `LOG()`**：**仅 FireWater 下有效**。随便打一句
+   `LOG("hello %.2f\n", 1.5f)`，按第 4 步的方法看文本，应出现 `hello 1.50`。
    - 打出 `hello %f` 原样 → 用的不是本包改过的 `SEGGER_RTT_printf.c`
      （SEGGER 原版不支持 `%f`），检查是否被工程里的旧版覆盖
    - 什么都没有 → 确认 `VOFA_PROTOCOL` 是不是 JustFloat，该协议下 LOG 被编译期禁用
    **验完记得关掉，LOG 文本会污染波形数据流。**
-9. **（可选）验下行命令**：确认 `LogTask()` 被周期调用后，
-   在 RTT Viewer 输入行发 `AT+1` 加回车，对应观察项的曲线应该出现；再发一次应消失。
-   没反应先查命令有没有带换行符。下行命令与上行协议无关，两种协议下都该好使。
+10. **（可选）验下行命令**：确认 `LogTask()` 被周期调用后，在 VOFA+ 的发送框发 `AT+1` 加换行，
+    对应观察项的曲线应该出现；再发一次应消失。没反应先查命令有没有带换行符。
+    下行命令与上行协议无关，两种协议下都该好使（经 `start_rtt.bat` 转发这条路尚未实测）。
