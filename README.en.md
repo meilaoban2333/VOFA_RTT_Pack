@@ -269,10 +269,13 @@ void VOFA_RTT_Send2(float ch0, float ch1);              // two channels
 void VOFA_RTT_Send(const float *data, unsigned ch_num); // N channels
 void VOFA_RTT_TestLoop(void);                           // self-test sine wave, can be removed
 
-LOG("fmt", ...);                                        // printf-style text printing
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len); // send raw bytes, no framing
+unsigned VOFA_RTT_SendStr(const char *s);               // send a string (FireWater only)
+LOG("fmt", ...);                                        // printf-style text printing (FireWater only)
 ```
 
 **The API is identical for both protocols**; switching protocols needs no change in the calling code.
+`SendStr` and `LOG` send nothing under JustFloat; see the LOG section below for why.
 
 Tunable in `vofa_rtt.h`:
 
@@ -302,7 +305,7 @@ when you replace the file with a newer version.
 | `BUFFER_SIZE_DOWN` | 16 | Down-buffer 0, receiving downlink commands. Longer commands are fine; `log_demo` assembles the line across reads |
 | `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | Number of up-channels; only channel 0 is used. Set 2 to move text to channel 1 (the script only relays channel 0, so view channel 1 in J-Link RTT Viewer) |
 | `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | Number of down-channels; only channel 0 is used |
-| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | Stack buffer used by `LOG()`; flushed in pieces when full. Larger means more complete writes but more stack |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 128 | Stack buffer used by `LOG()` (SEGGER's default is 64). A line that fits is written in one go, so a waveform frame sent from an interrupt cannot land in the middle of it; longer lines are sent in pieces. Larger is safer but every `LOG()` call uses more stack |
 | `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | What happens when the buffer is full: `NO_BLOCK_SKIP` drops the whole frame (recommended); `NO_BLOCK_TRIM` writes what fits and produces half frames, so do not use it with a waveform protocol; `BLOCK_IF_FIFO_FULL` waits for space and hangs the main loop when the script is not running. **Note that `VOFA_RTT_Init()` forces channel 0 to `NO_BLOCK_SKIP`, so this macro has no effect on channel 0**; change that line in `vofa_rtt.c` if you really need another mode |
 | `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | M3/M4/M7/M33 only: while writing RTT, `BASEPRI` masks interrupts whose priority register value is ≥ this (with STM32's 4 priority bits, priorities 2–15). Priority 0 and 1 interrupts are not masked, **so do not call RTT from them**. With FreeRTOS this is usually set to `configMAX_SYSCALL_INTERRUPT_PRIORITY`. M0/M0+ have no such setting and disable interrupts globally |
 | `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = copy byte by byte instead of `memcpy`, slightly faster for very small amounts; usually leave it |
@@ -323,6 +326,15 @@ Supports `%c %d %u %x %X %s %p %f %F %%`, with the `-` `0` `+` `#` flags, field 
 **`%f` was added to `SEGGER_RTT_printf` by this pack**; the SEGGER original does not support it. It is a
 fixed-point implementation with 6 decimals by default and a range of ±4294967295; values beyond that or NaN
 print an `Inf`/`NaN` marker instead of silently wrapping.
+
+Output of up to 128 bytes per call (`SEGGER_RTT_PRINTF_BUFFER_SIZE`) is written to RTT in one go: a
+waveform frame sent from an interrupt cannot land in the middle of the line, and when the buffer is full the
+whole line is dropped rather than half of it. Longer lines are written in pieces and lose this guarantee.
+
+For fixed text that needs no formatting, use `VOFA_RTT_SendStr("motor start\n")`: the whole string is
+written at once with no formatting cost, under the same rules as `LOG()` (FireWater only). For custom
+binary content use `VOFA_RTT_SendRaw(buf, len)`, which works under both protocols; under JustFloat you must
+make sure you write complete frames yourself.
 
 ⚠️ **Under FireWater, LOG shares channel 0 with the waveform.** Text that gets mixed in is parsed as data
 lines and shows up as stray points. **Do not use LOG while capturing waveforms; pick one.**
@@ -359,7 +371,7 @@ periodically, every 20–50 ms.
 | Item | Where | Default | Meaning |
 |------|-------|---------|---------|
 | `LOG_ID_xxx` | `log_demo.h` | 1–4 are examples | Watched-item IDs. **Valid range 1–31** (a 32-bit mask with one bit per ID; larger IDs are ignored); 0 always means "all off" |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX` or the whole frame is dropped |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX`, otherwise the build fails |
 | `LOG_LINE_MAX` | `log_demo.c` | 32 | Maximum characters per command; a longer command is discarded entirely |
 | Command format | `log_demo.c` | `AT+` | The prefix is always `AT+`; IDs are separated by any non-digit character (comma, space, ...) and the line ends with CR or LF |
 
@@ -437,7 +449,9 @@ Worth reading before changing anything:
   the float→ASCII conversion. The pack does not call the C library's `sprintf` (too big) and uses its own
   fixed-point `VOFA_FloatToStr()`, which only does integer division. Even so, **do not put it in a
   current loop or other high-rate interrupt**.
-- **JustFloat saves formatting cost, not transfer cost**: it copies the raw bytes with memcpy. The
+- **JustFloat saves formatting cost, not transfer cost**: it copies the raw float bytes and only replaces
+  Inf/NaN with 0 (the bytes of `+Inf` equal the frame tail `00 00 80 7F`, so sending it as is would make
+  VOFA+ cut the frame early). The
   difference is largest on M0/M0+ — float-to-ASCII takes about 28 us per channel while the RTT write
   itself takes about 1-2 us, so formatting is the real bottleneck.
 - **Both protocols share one sending API.** `VOFA_RTT_Send()` compiles into one of two implementations
@@ -450,7 +464,7 @@ Worth reading before changing anything:
   platforms would need per-channel byte swapping, which this pack does not do.
 - **Text and waveform must never share a JustFloat stream**: text bytes would be parsed as floats, or hit
   the frame tail `00 00 80 7F` and shift every channel from then on. That is why `LOG()` is disabled at
-  compile time for this protocol.
+  compile time for this protocol, and `VOFA_RTT_SendStr()` sends nothing.
 - **The script is a single batch + PowerShell hybrid file and is deliberately ASCII only.** GBK text breaks
   both CMD and PowerShell 5.1 parsing; do not add Chinese text to it.
 - **At startup the script ends leftover `JLink.exe` / `openocd.exe` processes**, which also ends an IDE

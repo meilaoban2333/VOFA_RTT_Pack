@@ -40,6 +40,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	uint32_t ipart;
 	uint32_t fpart;
 	uint32_t scaled;
+	float    scaled_f;
 	char     rev[12];
 	unsigned n = 0;
 
@@ -56,15 +57,14 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 		v = -v;
 	}
 
-	/*四舍五入到目标小数位，再拆成整数/小数两段；
-	  先做饱和再转 uint32，避免超量程时的未定义行为*/
-	if (v > (float)(0xFFFFFFFFu / scale))
-	{
-		v = (float)(0xFFFFFFFFu / scale);
-	}
-	scaled = (uint32_t)(v * (float)scale + 0.5f);
-	ipart  = scaled / scale;
-	fpart  = scaled % scale;
+	/*四舍五入到目标小数位，再拆成整数/小数两段。
+	  先在 float 域判断是否越过 2^32 再转 uint32，越界转换是未定义行为。
+	  阈值不能用 (float)0xFFFFFFFF：它会舍入成 2^32 本身。2^32 可被 float 精确
+	  表示，比它小的 float 最大是 4294967040，可安全转换*/
+	scaled_f = v * (float)scale + 0.5f;
+	scaled   = (scaled_f >= 4294967296.0f) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
+	ipart    = scaled / scale;
+	fpart    = scaled % scale;
 
 	/*整数部分：先逆序取十进制位，再翻转写出*/
 	do
@@ -161,22 +161,35 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
  * @note  帧格式 [f0:4B][f1:4B]...[00 00 80 7F]，帧尾是 VOFA+ 的切分依据。
  *        整帧一次性写入，避免多次调用 RTT_Write 导致帧被割裂——二进制流被
  *        割裂比文本更严重，会让之后所有通道错位。
- *        本平台是小端序，float 内存布局与 JustFloat 要求一致，可直接 memcpy，
- *        不做任何数值转换，这正是 JustFloat 相比 FireWater 省开销的地方。
+ *        本平台是小端序，float 内存布局与 JustFloat 要求一致，可按字节直接拷贝，
+ *        不做格式化，这正是 JustFloat 相比 FireWater 省开销的地方。
+ *        唯一的处理是 Inf/NaN 置 0：+Inf 的字节 00 00 80 7F 与帧尾完全相同，
+ *        原样发出会让 VOFA+ 在帧中间提前切帧；NaN/-Inf 一并置 0，与 FireWater 行为一致。
  */
 void VOFA_RTT_Send(const float *data, unsigned ch_num)
 {
 	uint8_t  frame[VOFA_FRAME_MAX];
 	unsigned len = 0;
+	unsigned i;
+	uint32_t bits;
 
 	if ((data == 0) || (ch_num == 0) || (ch_num > VOFA_CH_MAX))
 	{
 		return;
 	}
 
-	/*data 由调用方保证是 float 数组，此处按字节整体拷贝，不做任何数值转换*/
-	memcpy(&frame[len], data, ch_num * 4u);
-	len += ch_num * 4u;
+	for (i = 0; i < ch_num; i++)
+	{
+		/*经 memcpy 取位模式，避免指针强转违反严格别名规则*/
+		memcpy(&bits, &data[i], 4u);
+		/*指数位全 1 即 Inf/NaN，纯整数判断，不依赖 math.h*/
+		if ((bits & 0x7F800000u) == 0x7F800000u)
+		{
+			bits = 0u;
+		}
+		memcpy(&frame[len], &bits, 4u);
+		len += 4u;
+	}
 
 	memcpy(&frame[len], VOFA_FrameTail, sizeof(VOFA_FrameTail));
 	len += sizeof(VOFA_FrameTail);
@@ -205,6 +218,43 @@ void VOFA_RTT_Send2(float ch0, float ch1)
 	frame[1] = ch1;
 
 	VOFA_RTT_Send(frame, 2);
+}
+
+/**
+ * @brief 原样发送一段字节，不加任何帧格式
+ * @return 实际写入字节数，0 表示参数无效或缓冲空间不足被整块丢弃
+ * @note  0 号通道是 NO_BLOCK_SKIP 模式，空间不够时 SEGGER_RTT_Write 整块丢弃，
+ *        所以只调一次 Write，内容要么完整进缓冲、要么完全不进，不会留下半截
+ */
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len)
+{
+	if ((buf == 0) || (len == 0))
+	{
+		return 0;
+	}
+
+	return SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, buf, len);
+}
+
+/**
+ * @brief 发送 '\0' 结尾的字符串，仅 FireWater 下生效
+ * @note  JustFloat 是纯二进制流，混入文本会破坏帧对齐，与 LOG() 同理禁用。
+ *        保留真函数而不是宏，调用方使用返回值的代码在两种协议下都能编译
+ */
+unsigned VOFA_RTT_SendStr(const char *s)
+{
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER)
+	if (s == 0)
+	{
+		return 0;
+	}
+
+	/*WriteString 内部 strlen 后只调一次 Write，整串一次写入*/
+	return SEGGER_RTT_WriteString(VOFA_RTT_BUF_IDX, s);
+#else
+	(void)s;
+	return 0;
+#endif
 }
 
 /**

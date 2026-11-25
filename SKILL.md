@@ -142,6 +142,7 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 #define SEGGER_RTT_MAX_NUM_DOWN_BUFFERS  (1)     // 只用 0 号下行（收命令用）
 #define BUFFER_SIZE_UP                   (2048)  // 波形帧走这里，2K 对两种协议都够
 #define BUFFER_SIZE_DOWN                 (16)    // 下行只收短命令，16 字节够
+#define SEGGER_RTT_PRINTF_BUFFER_SIZE    (128u)  // LOG() 单行 <=128 字节一次写入（原默认 64）
 #define SEGGER_RTT_MODE_DEFAULT   SEGGER_RTT_MODE_NO_BLOCK_SKIP  // 缓冲满丢帧，不阻塞
 ```
 
@@ -193,9 +194,13 @@ void VOFA_RTT_Send1(float ch0);                        // 单通道
 void VOFA_RTT_Send2(float ch0, float ch1);             // 双通道
 void VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道，ch_num <= VOFA_CH_MAX
 void VOFA_RTT_TestLoop(void);                          // 正弦波自检，验证完可删
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len); // 原样发字节，不加帧格式，整块写入或整块丢弃
+unsigned VOFA_RTT_SendStr(const char *s);              // 发字符串，整串一次写入（仅 FireWater）
 ```
 
 这套接口**两种协议下完全一致**，切协议不用改任何调用代码。
+`SendStr` 在 JustFloat 下不发送、返回 0（与 `LOG()` 同理，见步骤 6）；`SendRaw` 两种协议都发，
+JustFloat 下调用方必须自己保证写的是完整帧。
 
 **发送频率必须节流。** 主循环裸跑不节流会以循环速度灌满缓冲导致丢帧和波形失真。
 参考 `VOFA_RTT_TestLoop()` 里的 tick 节流写法，或放在固定周期的定时器回调里发。
@@ -216,7 +221,11 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 **`%f` 是本包给 `SEGGER_RTT_printf` 补的**——SEGGER 原版完全不支持 `%f`。
 实现走定点转换，默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 `Inf`/`NaN` 标记，
-不静默回绕。输出长度不受限，内部 64 字节缓冲写满会自动 flush。
+不静默回绕。
+
+单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧插不进
+这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行分段写入，内容仍完整但失去这个保证。
+不需要格式化的固定文本用 `VOFA_RTT_SendStr()`，整串一次写入、没有格式化开销。
 
 ### 两种协议下 LOG 的行为不同
 
@@ -266,7 +275,7 @@ AT+0\n      -> 全部关闭
 1. 拷 `log_demo.c/.h` 进工程，`.c` 加入编译（与步骤 2 同样的做法）
 2. 改 `log_demo.h` 里的 `LOG_ID_xxx` 表为自己的观察项
 3. 改 `log_demo.c` 里 `LogPrint()` 的取值代码为自己的变量
-4. 更新 `LOG_CH_MAX` 为全开时的通道总数，并确认 **`LOG_CH_MAX <= VOFA_CH_MAX`**
+4. 更新 `LOG_CH_MAX` 为全开时的通道总数，并确认 **`LOG_CH_MAX <= VOFA_CH_MAX`**（超过时 `log_demo.c` 编译报错）
 5. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）
 
 实现要点，改的时候别破坏：
@@ -375,8 +384,11 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
   或直接换 JustFloat——它传原始 float，没有量程和精度损失。
 - **JustFloat 依赖小端序**。ARM Cortex-M 默认小端，满足；移植到大端平台需要
   逐通道字节翻转，本包未做。
+- **JustFloat 下 Inf/NaN 也被置 0**：`+Inf` 的字节与帧尾 `00 00 80 7F` 完全相同，原样发出
+  会让 VOFA+ 在帧中间提前切帧。波形上某通道恒为 0 时，先查源变量是否除零或溢出。
 - `LOG()` 在 FireWater 下与波形共用 0 号通道，同时用会污染数据流；
   在 JustFloat 下被编译期禁用，且**参数不会求值**，别把副作用写进 LOG 参数。
+  `VOFA_RTT_SendStr()` 同样只在 FireWater 下发送，但它是真函数，JustFloat 下参数照常求值。
 - `start_rtt.bat` 是 bat + PowerShell 5.1 混合单文件，**故意全 ASCII 无中文**：GBK 中文会导致 CMD
   和 PowerShell 5.1 解析错乱，改脚本时别加中文。
 - 脚本启动时会结束残留的 `JLink.exe` / `openocd.exe`，**会顺带结束 IDE 里正在跑的同名调试会话**。

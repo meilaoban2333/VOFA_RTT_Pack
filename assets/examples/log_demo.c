@@ -20,6 +20,10 @@
 #include "log_demo.h"
 #include "vofa_rtt.h"
 
+/* 编译期检查：LOG_CH_MAX 超过 VOFA_CH_MAX 时，全开的帧会被 VOFA_RTT_Send 整帧丢弃，
+   这里直接让编译报错（数组长度为 -1）。typedef 写法兼容 C90 */
+typedef char LOG_CH_MAX_must_not_exceed_VOFA_CH_MAX[(LOG_CH_MAX <= VOFA_CH_MAX) ? 1 : -1];
+
 /* 行缓冲：RTT 下行缓冲仅 BUFFER_SIZE_DOWN(默认16) 字节，命令要跨多次读取拼接 */
 #define LOG_LINE_MAX 32
 
@@ -96,11 +100,12 @@ static void LogCmdPoll(void)
 /* 打印已开启项，同一周期的多项拼成一行输出 */
 static void LogPrint(void)
 {
-    if (s_mask == 0)
-        return;
-
+    /* 声明必须在 return 之前：Keil AC5 默认 C90，语句之后再声明会报 #268 */
     float ch[LOG_CH_MAX];
     unsigned n = 0;
+
+    if (s_mask == 0)
+        return;
 
     /* ------------------------------------------------------------------
      * 以下为示例取值，移植时替换成自己工程的变量。

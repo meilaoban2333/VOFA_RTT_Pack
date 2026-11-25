@@ -51,7 +51,9 @@
  *   一帧 = ch_num 个 4 字节小端 float，后接 4 字节固定帧尾 00 00 80 7F，
  *   例如双通道：[f0:4B][f1:4B][00 00 80 7F]
  *   VOFA+ 按帧尾切分，帧内字节数除以 4 即通道数，无需额外握手。
- *   优点：直接 memcpy 原始字节，无任何数值转换，开销仅 memcpy；帧也更小。
+ *   优点：按字节拷贝原始 float，不做格式化，开销仅 memcpy 级；帧也更小。
+ *         唯一的处理是 Inf/NaN 置 0：+Inf 的字节与帧尾 00 00 80 7F 相同，
+ *         原样发出会让 VOFA+ 在帧中间提前切帧。
  *   代价：流里是二进制，RTT Viewer 看是乱码；依赖小端序（ARM Cortex-M 默认
  *         满足，移植到大端平台要逐通道字节翻转）；不能与 LOG() 共用通道，
  *         故 JustFloat 下 LOG() 被编译期禁用，详见下方 LOG 一节。
@@ -79,6 +81,10 @@
 #define VOFA_DECIMALS           3
 /* 单个数值的最大字符数：符号 1 + 整数位 10 + 小数点 1 + 小数位 VOFA_DECIMALS */
 #define VOFA_NUM_MAX            (12 + VOFA_DECIMALS)
+/* 10^VOFA_DECIMALS 必须在 uint32 内，超过 9 会溢出出乱码 */
+#if (VOFA_DECIMALS < 0) || (VOFA_DECIMALS > 9)
+#error "VOFA_DECIMALS must be 0..9"
+#endif
 #endif
 
 /* 初始化：0 号通道由 SEGGER_RTT_Init 预置，这里只做显式初始化，需在 main() 前段调用 */
@@ -94,6 +100,19 @@ void VOFA_RTT_Send1(float ch0);
 /* 推送双通道的便捷接口 */
 void VOFA_RTT_Send2(float ch0, float ch1);
 
+/* 原样发送 len 字节，不加任何帧格式（自定义帧、预先格式化好的文本等）。
+   整块一次写入：缓冲剩余空间不够时整块丢弃，不会只写半截；
+   len 超过 BUFFER_SIZE_UP - 1 必然被丢弃。
+   返回实际写入字节数，0 表示被丢弃或参数无效。
+   JustFloat 下内容会直接混进二进制流，调用方必须自己保证写的是完整帧 */
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len);
+
+/* 发送 '\0' 结尾的字符串，整串一次写入，丢弃规则同 VOFA_RTT_SendRaw。
+   适合发不需要格式化的固定日志，比 LOG() 省掉格式化开销。
+   与 LOG() 一样只在 FireWater 下生效；JustFloat 下不发送、返回 0（原因见 LOG 一节）。
+   它是真函数，JustFloat 下参数照常求值，这点与 LOG() 不同 */
+unsigned VOFA_RTT_SendStr(const char *s);
+
 /* 主循环里调用，内部按 VOFA_TEST_PERIOD_MS 节流后发送正弦波测试数据 */
 void VOFA_RTT_TestLoop(void);
 
@@ -108,7 +127,10 @@ void VOFA_RTT_TestLoop(void);
  *   %f 是本工程给 SEGGER_RTT_printf 补的（原版不支持），定点输出，
  *   默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 Inf/NaN 标记。
  *
- * 输出长度不受限：内部 64 字节缓冲写满会自动 flush，长字符串照样完整输出。
+ * 单条输出不超过 SEGGER_RTT_PRINTF_BUFFER_SIZE（本包设为 128，见 SEGGER_RTT_Conf.h）
+ * 字节时一次写入 RTT：中断里的波形帧插不进这一行中间，缓冲满时整条丢弃而不是
+ * 只写半截。超过的部分会分段写入，内容仍完整，但失去上面两点保证。
+ * 该缓冲在栈上，每次调用 LOG 占用这么多栈。
  *
  * ★ 与协议的关系（两种协议下行为不同，务必看清）：
  *

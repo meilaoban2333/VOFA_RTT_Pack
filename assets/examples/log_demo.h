@@ -43,7 +43,8 @@
 #define LOG_ID_SPEED 4 // 示例：转速，rpm
 
 /* 全开时的通道总数：角度1 + 电流3 + 母线1 + 转速2。
-   必须 <= vofa_rtt.h 里的 VOFA_CH_MAX，否则整帧会被丢弃 */
+   必须 <= vofa_rtt.h 里的 VOFA_CH_MAX，超过时 log_demo.c 编译报错。
+   LogPrint() 里新增观察项时记得同步调大，否则会写越栈上的 ch[] 数组 */
 #define LOG_CH_MAX   7
 
 /* 周期调用：解析下行命令 + 打印已开启项。建议 20~50ms 一次 */

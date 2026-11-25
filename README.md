@@ -250,10 +250,13 @@ void VOFA_RTT_Send2(float ch0, float ch1);              // 双通道
 void VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道
 void VOFA_RTT_TestLoop(void);                           // 自检正弦波，可删
 
-LOG("fmt", ...);                                        // printf 风格文本打印
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len); // 原样发字节，不加帧格式
+unsigned VOFA_RTT_SendStr(const char *s);               // 发字符串（仅 FireWater）
+LOG("fmt", ...);                                        // printf 风格文本打印（仅 FireWater）
 ```
 
 这套接口**两种协议下完全一致**，切协议不用改任何调用代码。
+`SendStr` 和 `LOG` 在 JustFloat 下不发送任何内容，原因见下方 LOG 一节。
 
 `vofa_rtt.h` 里可调：
 
@@ -280,7 +283,7 @@ LOG("fmt", ...);                                        // printf 风格文本�
 | `BUFFER_SIZE_DOWN` | 16 | 0 号下行缓冲，收下行命令。命令比它长也没关系，`log_demo` 会跨次拼行 |
 | `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | 上行通道数，只用 0 号。想把文本挪到 1 号通道时改成 2（脚本只转发 0 号，1 号要用 J-Link RTT Viewer 看） |
 | `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | 下行通道数，只用 0 号 |
-| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | `LOG()` 用的栈上缓冲，写满自动分段发送。调大一次发得更完整，但占更多栈 |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 128 | `LOG()` 用的栈上缓冲（SEGGER 原默认 64）。单行不超过它就一次写入，中断里的波形帧插不进行中间；超过则分段发送。调大更稳，但每次 `LOG()` 占更多栈 |
 | `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | 缓冲满时怎么办：`NO_BLOCK_SKIP` 整帧丢弃（推荐）；`NO_BLOCK_TRIM` 能写多少写多少，会产生半帧，波形协议别用；`BLOCK_IF_FIFO_FULL` 等到有空间，没开脚本时会卡死主循环。**注意 `VOFA_RTT_Init()` 会把 0 号通道强制设成 `NO_BLOCK_SKIP`，改这个宏对 0 号不起作用**，真要改得改 `vofa_rtt.c` 里那一行 |
 | `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | 仅 M3/M4/M7/M33：写 RTT 时用 `BASEPRI` 屏蔽优先级寄存器值 ≥ 它的中断（STM32 的 4 位优先级下即优先级 2~15）。优先级 0、1 的中断不会被屏蔽，**这些中断里不要调用 RTT**。用 FreeRTOS 时一般设成 `configMAX_SYSCALL_INTERRUPT_PRIORITY`。M0/M0+ 没有这项，直接关全局中断 |
 | `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = 用逐字节拷贝代替 `memcpy`，数据量很小时略快，一般不用动 |
@@ -300,6 +303,13 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 **`%f` 是本包给 `SEGGER_RTT_printf` 补的**，SEGGER 原版不支持。定点实现，
 默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 `Inf`/`NaN` 标记而不是静默回绕。
+
+单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧
+插不进这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行会分段写入，失去这个保证。
+
+不需要格式化的固定文本用 `VOFA_RTT_SendStr("motor start\n")`，整串一次写入、没有格式化开销，
+规则与 `LOG()` 相同（仅 FireWater）。要发自定义二进制内容用 `VOFA_RTT_SendRaw(buf, len)`，
+两种协议都可用，但 JustFloat 下必须自己保证写的是完整帧。
 
 ⚠️ **FireWater 下 LOG 与波形共用 0 号通道**，混进来的文本会被当成数据行，
 波形上表现为乱跳的点。**采集波形期间不要开 LOG，两者择一。**
@@ -332,7 +342,7 @@ AT+0\n      全部关闭
 | 项 | 位置 | 默认 | 说明 |
 |----|------|------|------|
 | `LOG_ID_xxx` | `log_demo.h` | 1~4 是示例 | 观察项编号。**有效范围 1~31**（32 位掩码，每号占 1 bit，超出的号被忽略），0 固定表示全部关闭 |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，否则整帧被丢弃 |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，超过时编译报错 |
 | `LOG_LINE_MAX` | `log_demo.c` | 32 | 一条命令最多多少字符，超长的整条命令作废 |
 | 命令格式 | `log_demo.c` | `AT+` | 前缀固定为 `AT+`，号之间用逗号、空格等任意非数字字符分隔，以回车或换行结束 |
 
@@ -397,7 +407,8 @@ AT+0\n      全部关闭
   不用猜是发送端错了还是上位机解析配错了。代价是 float→ASCII 的转换开销。
   本包不调 C 库 `sprintf`（体积大），自带定点转换 `VOFA_FloatToStr()`，只做整数除法取位。
   即便如此**也不要放进电流环等高频中断**。
-- **JustFloat 省的是格式化开销，不是传输开销**：它直接 memcpy 原始字节。
+- **JustFloat 省的是格式化开销，不是传输开销**：它按字节拷贝原始 float，只把 Inf/NaN 置 0
+  （`+Inf` 的字节与帧尾 `00 00 80 7F` 相同，原样发出会让 VOFA+ 在帧中间提前切帧）。
   在 M0/M0+ 上差距最明显——float 转 ASCII 单通道实测约 28us，
   而 RTT 写入本身只要约 1~2us，格式化才是真瓶颈。
 - **两种协议共用一套发送接口**，`VOFA_RTT_Send()` 按 `VOFA_PROTOCOL` 条件编译成
@@ -407,7 +418,8 @@ AT+0\n      全部关闭
 - **JustFloat 依赖小端序**：ARM Cortex-M 默认小端，满足；大端平台需逐通道字节翻转，
   本包未做。
 - **JustFloat 下文本与波形绝对不能混流**：文本字节会被当 float 解析，或撞上帧尾
-  `00 00 80 7F` 导致此后所有通道错位。所以 `LOG()` 在该协议下被编译期禁用。
+  `00 00 80 7F` 导致此后所有通道错位。所以 `LOG()` 在该协议下被编译期禁用，
+  `VOFA_RTT_SendStr()` 也不发送。
 - **脚本是 bat + PowerShell 混合的单文件，故意全 ASCII 无中文**：GBK 中文会导致 CMD 和
   PowerShell 5.1 解析错乱，别加中文。
 - **脚本启动时会结束残留的 `JLink.exe` / `openocd.exe`**，会顺带结束 IDE 里正在跑的同名调试会话。
