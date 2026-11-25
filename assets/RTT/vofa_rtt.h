@@ -25,7 +25,7 @@
  *
  * J-Link Commander 手动操作（start_rtt.bat 已自动完成，仅供手工排查参考）：
  *   J-Link>connect
- *   Device>STM32F407VE      <- 只填器件名，改成自己的芯片型号
+ *   Device>STM32G070RB      <- 只填器件名，改成自己的芯片型号
  *   TIF>S
  *   Speed>4000
  *   J-Link>rtt start
@@ -63,7 +63,8 @@
  *     1) 采样率要求高（kHz 级），格式化开销扛不住；
  *     2) 目标是 Cortex-M0/M0+，无 FPU 且无硬件除法，float 转 ASCII 单通道
  *        实测约 28us，是 RTT 写入本身(memcpy 约 1~2us)的几十倍——
- *        此时格式化而非传输才是真正的瓶颈。
+ *        此时格式化而非传输才是真正的瓶颈。（28us 是改成每位只做一次除法之前
+ *        测的，现在会少一些，尚未重新实测）
  * ------------------------------------------------------------------------- */
 #define VOFA_PROTO_FIREWATER    0
 #define VOFA_PROTO_JUSTFLOAT    1
@@ -91,14 +92,30 @@
 void VOFA_RTT_Init(void);
 
 /* 推送一帧数据，data 指向 ch_num 个 float（ch_num <= VOFA_CH_MAX）。
-   帧格式由 VOFA_PROTOCOL 决定，调用方式两种协议完全一致 */
-void VOFA_RTT_Send(const float *data, unsigned ch_num);
+   帧格式由 VOFA_PROTOCOL 决定，调用方式两种协议完全一致。
+   返回写入字节数；0 表示整帧被丢弃（参数无效，或缓冲剩余空间不够），
+   可用来统计丢帧，不关心时忽略返回值即可 */
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num);
 
-/* 推送单通道的便捷接口 */
-void VOFA_RTT_Send1(float ch0);
+/* 推送单通道的便捷接口，返回值同 VOFA_RTT_Send */
+unsigned VOFA_RTT_Send1(float ch0);
 
-/* 推送双通道的便捷接口 */
-void VOFA_RTT_Send2(float ch0, float ch1);
+/* 推送双通道的便捷接口，返回值同 VOFA_RTT_Send */
+unsigned VOFA_RTT_Send2(float ch0, float ch1);
+
+/* 一行发任意个通道，不用先建数组：VOFA_SEND(speed, iq, id_ref);
+   参数按 float 转换（int、double 都行），每个只求值一次，返回值同 VOFA_RTT_Send。
+   参数个数超过 VOFA_CH_MAX 时编译报错（数组长度为负），不会等到运行时整帧丢弃。
+   依赖 C99 复合字面量，C90 下不提供：Keil AC5 要勾选
+   Options for Target -> C/C++ -> C99 Mode，AC6 / GCC 默认即可 */
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L)
+/* 参数个数：sizeof 只看复合字面量的类型，不对参数求值 */
+#define VOFA_ARG_NUM(...)       (sizeof((const float[]){__VA_ARGS__}) / sizeof(float))
+#define VOFA_SEND(...) \
+    VOFA_RTT_Send((const float[]){__VA_ARGS__}, \
+                  (unsigned)(VOFA_ARG_NUM(__VA_ARGS__) + \
+                             0u * sizeof(char[(VOFA_ARG_NUM(__VA_ARGS__) <= VOFA_CH_MAX) ? 1 : -1])))
+#endif
 
 /* 原样发送 len 字节，不加任何帧格式（自定义帧、预先格式化好的文本等）。
    整块一次写入：缓冲剩余空间不够时整块丢弃，不会只写半截；
@@ -168,5 +185,11 @@ void VOFA_RTT_TestLoop(void);
 #define VOFA_SINE_FREQ_HZ       1.0f
 /* 测试正弦波幅值 */
 #define VOFA_SINE_AMP           100.0f
+
+/* 毫秒时基，只有 VOFA_RTT_TestLoop 节流用到，返回 uint32_t、允许回绕。
+   默认 STM32 HAL 的 HAL_GetTick()，声明在 main.h；该头文件只在 vofa_rtt.c 里包含。
+   非 HAL 工程把两行一起改掉，如 "board.h" 和 millis()，不用再动 vofa_rtt.c */
+#define VOFA_TICK_HEADER        "main.h"
+#define VOFA_GET_TICK_MS()      HAL_GetTick()
 
 #endif /* __VOFA_RTT_H */

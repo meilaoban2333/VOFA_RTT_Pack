@@ -1,28 +1,16 @@
 #include "vofa_rtt.h"
-#include <math.h>//sinf/cosf(TestLoop 用)，FireWater 还用到 isfinite
-#include "main.h"//HAL_GetTick
-
-#if (VOFA_PROTOCOL == VOFA_PROTO_JUSTFLOAT)
-#include <string.h>//memcpy
-#endif
+#include <math.h>//sinf/cosf，TestLoop 用
+#include <string.h>//memcpy，取 float 位模式
+#include VOFA_TICK_HEADER//VOFA_GET_TICK_MS() 的声明，TestLoop 用，见 vofa_rtt.h
 
 #if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER)
 
 /* 单帧最大字节数：每通道最多 VOFA_NUM_MAX 字节，通道间 1 字节逗号，末尾 1 字节 '\n' */
 #define VOFA_FRAME_MAX      (VOFA_CH_MAX * (VOFA_NUM_MAX + 1) + 1)
 
-/* 10^VOFA_DECIMALS，用于把小数部分整体搬到整数域再逐位输出 */
-static uint32_t VOFA_Pow10(unsigned n)
-{
-	uint32_t p = 1u;
-
-	while (n--)
-	{
-		p *= 10u;
-	}
-
-	return p;
-}
+/* 10^n 的 float 值，用于把小数部分搬到整数域。查表而不是运行时连乘，
+   省掉循环和一次整数转 float（M0/M0+ 上都是软件实现）。1e9f 可被 float 精确表示 */
+static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1e7f, 1e8f, 1e9f};
 
 /**
  * @brief 把 float 转成定点十进制 ASCII，写入 buf
@@ -32,63 +20,69 @@ static uint32_t VOFA_Pow10(unsigned n)
  * @note  只做定点转换，不支持科学计数法：VOFA+ 波形观察的量程有限，
  *        定点足够且避免引入 C 库 sprintf（体积大且可能不可重入）。
  *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
+ *        M0/M0+ 无 FPU 也无硬件除法，浮点比较和整数除法都是库函数调用，
+ *        所以符号、NaN/Inf、越界都按位模式判断，每个十进制位只做一次除法。
  */
 static unsigned VOFA_FloatToStr(char *buf, float v)
 {
-	const uint32_t scale = VOFA_Pow10(VOFA_DECIMALS);
+	char     rev[VOFA_NUM_MAX];
 	unsigned len = 0;
-	uint32_t ipart;
-	uint32_t fpart;
+	unsigned n   = 0;
+	uint32_t bits;
 	uint32_t scaled;
+	uint32_t q;
 	float    scaled_f;
-	char     rev[12];
-	unsigned n = 0;
+#if (VOFA_DECIMALS > 0)
+	unsigned k;
+#endif
 
-	/*NaN/Inf 无法定点表示，输出 0 保持帧结构完整*/
-	if (!isfinite(v))
+	/*经 memcpy 取位模式，避免指针强转违反严格别名规则*/
+	memcpy(&bits, &v, 4u);
+
+	/*指数位全 1 即 NaN/Inf，无法定点表示，输出 0 保持帧结构完整*/
+	if ((bits & 0x7F800000u) == 0x7F800000u)
 	{
 		buf[len++] = '0';
 		return len;
 	}
 
-	if (v < 0.0f)
+	/*符号位为 1 且不是 -0.0 才输出负号，与 v < 0.0f 等价*/
+	if ((bits & 0x80000000u) && (bits & 0x7FFFFFFFu))
 	{
 		buf[len++] = '-';
-		v = -v;
 	}
+	bits &= 0x7FFFFFFFu;/*清符号位取绝对值*/
+	memcpy(&v, &bits, 4u);
 
-	/*四舍五入到目标小数位，再拆成整数/小数两段。
-	  先在 float 域判断是否越过 2^32 再转 uint32，越界转换是未定义行为。
-	  阈值不能用 (float)0xFFFFFFFF：它会舍入成 2^32 本身。2^32 可被 float 精确
-	  表示，比它小的 float 最大是 4294967040，可安全转换*/
-	scaled_f = v * (float)scale + 0.5f;
-	scaled   = (scaled_f >= 4294967296.0f) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
-	ipart    = scaled / scale;
-	fpart    = scaled % scale;
+	/*四舍五入到目标小数位，整体当一个整数处理。
+	  越过 2^32 的 float 转 uint32 是未定义行为，必须先判断。非负 float 的位模式
+	  与数值同序，位模式 >= 0x4F800000 即 >= 2^32，免去一次软件浮点比较*/
+	scaled_f = v * VOFA_Scale[VOFA_DECIMALS] + 0.5f;
+	memcpy(&bits, &scaled_f, 4u);
+	scaled = (bits >= 0x4F800000u) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
 
-	/*整数部分：先逆序取十进制位，再翻转写出*/
+	/*从最低位起逆序取数：先定长 VOFA_DECIMALS 位小数（不足补零），再整数部分。
+	  余数用"原值 - 商*10"求，每位只调一次除法：分开写 /10 和 %10 时，
+	  实测 GCC 14 在 M0+ 上会各调一次库函数，并不合并*/
+#if (VOFA_DECIMALS > 0)
+	for (k = 0; k < VOFA_DECIMALS; k++)
+	{
+		q = scaled / 10u;
+		rev[n++] = (char)('0' + (scaled - q * 10u));
+		scaled = q;
+	}
+	rev[n++] = '.';
+#endif
 	do
 	{
-		rev[n++] = (char)('0' + (ipart % 10u));
-		ipart /= 10u;
-	} while (ipart);
+		q = scaled / 10u;
+		rev[n++] = (char)('0' + (scaled - q * 10u));
+		scaled = q;
+	} while (scaled);
 
 	while (n--)
 	{
 		buf[len++] = rev[n];
-	}
-
-	/*小数部分：定长 VOFA_DECIMALS 位，高位补零（scale/10 起逐位下降）*/
-	if (VOFA_DECIMALS > 0)
-	{
-		uint32_t div = scale / 10u;
-
-		buf[len++] = '.';
-		while (div)
-		{
-			buf[len++] = (char)('0' + (fpart / div) % 10u);
-			div /= 10u;
-		}
 	}
 
 	return len;
@@ -123,11 +117,12 @@ void VOFA_RTT_Init(void)
  * @brief 推送一帧 FireWater 文本数据
  * @param data   指向 ch_num 个 float
  * @param ch_num 通道数，需 <= VOFA_CH_MAX
+ * @return 写入字节数，0 表示参数无效或缓冲空间不足整帧丢弃
  * @note  帧格式 "v0,v1,...,vn\n"，通道间逗号分隔，'\n' 为帧结束符。
  *        整帧一次性写入，避免多次调用 RTT_Write 导致帧被其他输出割裂——
  *        FireWater 是文本协议，帧被割裂会直接让上位机解析错行。
  */
-void VOFA_RTT_Send(const float *data, unsigned ch_num)
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num)
 {
 	char     frame[VOFA_FRAME_MAX];
 	unsigned len = 0;
@@ -135,7 +130,7 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
 
 	if ((data == 0) || (ch_num == 0) || (ch_num > VOFA_CH_MAX))
 	{
-		return;
+		return 0;
 	}
 
 	for (i = 0; i < ch_num; i++)
@@ -149,7 +144,7 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
 
 	frame[len++] = '\n';
 
-	SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
+	return SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
 }
 
 #else  /* VOFA_PROTO_JUSTFLOAT */
@@ -158,6 +153,7 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
  * @brief 推送一帧 JustFloat 二进制数据
  * @param data   指向 ch_num 个 float
  * @param ch_num 通道数，需 <= VOFA_CH_MAX
+ * @return 写入字节数，0 表示参数无效或缓冲空间不足整帧丢弃
  * @note  帧格式 [f0:4B][f1:4B]...[00 00 80 7F]，帧尾是 VOFA+ 的切分依据。
  *        整帧一次性写入，避免多次调用 RTT_Write 导致帧被割裂——二进制流被
  *        割裂比文本更严重，会让之后所有通道错位。
@@ -166,7 +162,7 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
  *        唯一的处理是 Inf/NaN 置 0：+Inf 的字节 00 00 80 7F 与帧尾完全相同，
  *        原样发出会让 VOFA+ 在帧中间提前切帧；NaN/-Inf 一并置 0，与 FireWater 行为一致。
  */
-void VOFA_RTT_Send(const float *data, unsigned ch_num)
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num)
 {
 	uint8_t  frame[VOFA_FRAME_MAX];
 	unsigned len = 0;
@@ -175,7 +171,7 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
 
 	if ((data == 0) || (ch_num == 0) || (ch_num > VOFA_CH_MAX))
 	{
-		return;
+		return 0;
 	}
 
 	for (i = 0; i < ch_num; i++)
@@ -194,30 +190,30 @@ void VOFA_RTT_Send(const float *data, unsigned ch_num)
 	memcpy(&frame[len], VOFA_FrameTail, sizeof(VOFA_FrameTail));
 	len += sizeof(VOFA_FrameTail);
 
-	SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
+	return SEGGER_RTT_Write(VOFA_RTT_BUF_IDX, frame, len);
 }
 
 #endif /* VOFA_PROTOCOL */
 
 /**
- * @brief 单通道推送
+ * @brief 单通道推送，返回值同 VOFA_RTT_Send
  */
-void VOFA_RTT_Send1(float ch0)
+unsigned VOFA_RTT_Send1(float ch0)
 {
-	VOFA_RTT_Send(&ch0, 1);
+	return VOFA_RTT_Send(&ch0, 1);
 }
 
 /**
- * @brief 双通道推送
+ * @brief 双通道推送，返回值同 VOFA_RTT_Send
  */
-void VOFA_RTT_Send2(float ch0, float ch1)
+unsigned VOFA_RTT_Send2(float ch0, float ch1)
 {
 	float frame[2];
 
 	frame[0] = ch0;
 	frame[1] = ch1;
 
-	VOFA_RTT_Send(frame, 2);
+	return VOFA_RTT_Send(frame, 2);
 }
 
 /**
@@ -269,7 +265,7 @@ void VOFA_RTT_TestLoop(void)
 	static float    s_phase     = 0.0f;/*当前相位(rad)*/
 	/*每次发送的相位增量 = 2π × 频率 × 采样周期*/
 	const float phase_step = 6.283185307f * VOFA_SINE_FREQ_HZ * (VOFA_TEST_PERIOD_MS / 1000.0f);
-	uint32_t now = HAL_GetTick();
+	uint32_t now = VOFA_GET_TICK_MS();
 
 	/*相减比较，天然兼容 tick 溢出回绕*/
 	if ((now - s_last_tick) < VOFA_TEST_PERIOD_MS)

@@ -1,0 +1,2 @@
+# shell 脚本固定 LF：autocrlf=true 的 Windows 检出成 CRLF 后 sh 会报错
+*.sh text eol=lf
