@@ -71,7 +71,8 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 **什么时候切到 JustFloat**：
 1. 采样率要求高（kHz 级），格式化开销扛不住；
 2. 目标是 Cortex-M0/M0+，无 FPU 且无硬件除法，float 转 ASCII 单通道实测约 28us，
-   是 RTT 写入本身(memcpy 约 1~2us)的几十倍——此时格式化而非传输才是真瓶颈；
+   是 RTT 写入本身(memcpy 约 1~2us)的几十倍——此时格式化而非传输才是真瓶颈
+   （28us 是减少除法次数之前测的，现在会少一些，未重测）；
 3. 需要完整 float 精度，或数值量程超出定点范围。
 
 **切到 JustFloat 会失去的**：`LOG()` 文本打印（编译期被禁用，原因见步骤 6）、
@@ -104,8 +105,9 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 `assets/examples/` 下另有可选的 `log_demo.c/.h`（下行命令动态开关日志项），
 不需要运行时开关可以不拷，见步骤 7。
 
-`vofa_rtt.c` 里 `#include "main.h"` 是为了拿 `HAL_GetTick()`。非 HAL 工程要把
-`VOFA_RTT_TestLoop()` 里的 `HAL_GetTick()` 换成自己的毫秒计时源，或直接删掉这个测试函数。
+`vofa_rtt.c` 经 `vofa_rtt.h` 末尾的 `VOFA_TICK_HEADER`（默认 `"main.h"`）拿 `VOFA_GET_TICK_MS()`
+（默认 `HAL_GetTick()`），只给自检函数 `VOFA_RTT_TestLoop()` 用。非 HAL 工程把这两行改成用户自己的
+头文件和毫秒计时函数（返回 `uint32_t`，允许回绕），`vofa_rtt.c` 不用动。
 
 ## 步骤 2：加入构建
 
@@ -124,7 +126,7 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 | 参数 | 默认 | 谁用 | 说明 |
 |------|------|------|------|
 | `PROBE` | `auto` | 全部 | `auto` 按 J-Link → ST-Link → CMSIS-DAP 识别；多种同时插着时写死 `jlink` / `cmsis-dap` / `stlink` |
-| `DEVICE` | `STM32F407VE` | J-Link | SEGGER 器件名（去掉封装/温度后缀，如 `STM32F407VE`、`STM32G070RB`、`STM32H743XI`），**改成用户的芯片**，写错连不上 |
+| `DEVICE` | `STM32G070RB` | J-Link | SEGGER 器件名（去掉封装/温度后缀，如 `STM32F407VE`、`STM32G070RB`、`STM32H743XI`），**改成用户的芯片**，写错连不上。默认值与下面 OpenOCD 的几项是同一颗 G070 |
 | `TARGETCFG` | `target/stm32g0x.cfg` | CMSIS-DAP / ST-Link | OpenOCD `scripts/target/` 下的目标脚本，默认对应 STM32G070RB，**改成用户的芯片**，如 `target/stm32f1x.cfg`、`target/stm32f4x.cfg`、`target/stm32h7x.cfg` |
 | `RAM_START` / `RAM_SIZE` | `0x20000000` / `0x9000` | CMSIS-DAP / ST-Link | 控制块搜索范围，**必须覆盖 `_SEGGER_RTT`**。默认是 G070 的 36KB SRAM，换芯片必改（F407VE 用 `0x20000000` / `0x20000`）。最稳：按 `.map` 里 `_SEGGER_RTT` 的地址填 `RAM_START`，`RAM_SIZE` 填 `0x100`（查法见 `references/porting.md`） |
 | `AUTOFLASH` | `1` | CMSIS-DAP / ST-Link | 1 = 编译即下载，0 = 关闭 |
@@ -142,6 +144,7 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 #define SEGGER_RTT_MAX_NUM_DOWN_BUFFERS  (1)     // 只用 0 号下行（收命令用）
 #define BUFFER_SIZE_UP                   (2048)  // 波形帧走这里，2K 对两种协议都够
 #define BUFFER_SIZE_DOWN                 (16)    // 下行只收短命令，16 字节够
+#define SEGGER_RTT_PRINTF_BUFFER_SIZE    (128u)  // LOG() 单行 <=128 字节一次写入（原默认 64）
 #define SEGGER_RTT_MODE_DEFAULT   SEGGER_RTT_MODE_NO_BLOCK_SKIP  // 缓冲满丢帧，不阻塞
 ```
 
@@ -188,14 +191,25 @@ int main(void)
 可用接口：
 
 ```c
-void VOFA_RTT_Init(void);                              // 初始化，main 起始调用
-void VOFA_RTT_Send1(float ch0);                        // 单通道
-void VOFA_RTT_Send2(float ch0, float ch1);             // 双通道
-void VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道，ch_num <= VOFA_CH_MAX
-void VOFA_RTT_TestLoop(void);                          // 正弦波自检，验证完可删
+void VOFA_RTT_Init(void);                                   // 初始化，main 起始调用
+unsigned VOFA_RTT_Send1(float ch0);                         // 单通道
+unsigned VOFA_RTT_Send2(float ch0, float ch1);              // 双通道
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道，ch_num <= VOFA_CH_MAX
+VOFA_SEND(a, b, c);                                         // 任意个通道一行发，不用建数组（需 C99）
+void VOFA_RTT_TestLoop(void);                               // 正弦波自检，验证完可删
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len);   // 原样发字节，不加帧格式，整块写入或整块丢弃
+unsigned VOFA_RTT_SendStr(const char *s);                   // 发字符串，整串一次写入（仅 FireWater）
 ```
 
 这套接口**两种协议下完全一致**，切协议不用改任何调用代码。
+`SendStr` 在 JustFloat 下不发送、返回 0（与 `LOG()` 同理，见步骤 6）；`SendRaw` 两种协议都发，
+JustFloat 下调用方必须自己保证写的是完整帧。
+
+发送接口都返回写入字节数，**0 表示整帧被丢弃**（缓冲满或参数无效），用户要排查丢帧时可以计数。
+
+用户要发的通道是零散变量时，优先写 `VOFA_SEND(a, b, c)`：参数按 float 转换、每个只求值一次，
+个数超过 `VOFA_CH_MAX` 直接编译报错。它依赖 C99 复合字面量，**C90 下不提供**——Keil AC5 工程要先确认
+`Options for Target` → `C/C++` → `C99 Mode` 已勾选，没勾就改用数组 + `VOFA_RTT_Send()`，或请用户勾上。
 
 **发送频率必须节流。** 主循环裸跑不节流会以循环速度灌满缓冲导致丢帧和波形失真。
 参考 `VOFA_RTT_TestLoop()` 里的 tick 节流写法，或放在固定周期的定时器回调里发。
@@ -216,7 +230,11 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 **`%f` 是本包给 `SEGGER_RTT_printf` 补的**——SEGGER 原版完全不支持 `%f`。
 实现走定点转换，默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 `Inf`/`NaN` 标记，
-不静默回绕。输出长度不受限，内部 64 字节缓冲写满会自动 flush。
+不静默回绕。
+
+单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧插不进
+这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行分段写入，内容仍完整但失去这个保证。
+不需要格式化的固定文本用 `VOFA_RTT_SendStr()`，整串一次写入、没有格式化开销。
 
 ### 两种协议下 LOG 的行为不同
 
@@ -266,7 +284,7 @@ AT+0\n      -> 全部关闭
 1. 拷 `log_demo.c/.h` 进工程，`.c` 加入编译（与步骤 2 同样的做法）
 2. 改 `log_demo.h` 里的 `LOG_ID_xxx` 表为自己的观察项
 3. 改 `log_demo.c` 里 `LogPrint()` 的取值代码为自己的变量
-4. 更新 `LOG_CH_MAX` 为全开时的通道总数，并确认 **`LOG_CH_MAX <= VOFA_CH_MAX`**
+4. 更新 `LOG_CH_MAX` 为全开时的通道总数，并确认 **`LOG_CH_MAX <= VOFA_CH_MAX`**（超过时 `log_demo.c` 编译报错）
 5. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）
 
 实现要点，改的时候别破坏：
@@ -352,8 +370,9 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
 | 波形里混入乱跳的点 | FireWater 下 `LOG()` 文本混进数据流 | 采集波形时关掉 LOG，两者共用 0 号通道 |
 | `LOG()` 完全没输出 | 当前是 JustFloat，LOG 被编译期禁用 | 这是预期行为；要文本就切回 FireWater（见步骤 6） |
 | 切 JustFloat 后某变量不自增 | 副作用写在了 `LOG()` 参数里 | 把 `i++` 之类移出 LOG 参数 |
-| 波形卡顿丢点 | 发送太快缓冲溢出 | 降低发送频率、调大 `BUFFER_SIZE_UP`，或换 JustFloat 省带宽 |
+| 波形卡顿丢点 | 发送太快缓冲溢出 | 降低发送频率、调大 `BUFFER_SIZE_UP`，或换 JustFloat 省带宽；发送接口返回 0 即是被丢的帧，可计数确认 |
 | 某帧完全没出现 | `ch_num > VOFA_CH_MAX`，整帧被丢 | 调大 `vofa_rtt.h` 的 `VOFA_CH_MAX` |
+| 某通道一直是 0 | 源变量是 Inf/NaN（除零、未初始化等），两种协议都发成 0 | 查该变量的计算 |
 | 数值精度不够 | FireWater 的 `VOFA_DECIMALS` 默认 3 位 | 调大 `VOFA_DECIMALS`；或换 JustFloat 得到完整精度 |
 | 大数值显示成固定上限 | FireWater 超出定点量程被饱和 | MCU 侧先缩放（如除以 1000）；或换 JustFloat |
 | `%f` 打印出 `Inf`/`NaN` | 超出 ±4294967295 或本身非有限 | 检查源变量，或先缩放 |
@@ -375,8 +394,13 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
   或直接换 JustFloat——它传原始 float，没有量程和精度损失。
 - **JustFloat 依赖小端序**。ARM Cortex-M 默认小端，满足；移植到大端平台需要
   逐通道字节翻转，本包未做。
+- **JustFloat 下 Inf/NaN 也被置 0**：`+Inf` 的字节与帧尾 `00 00 80 7F` 完全相同，原样发出
+  会让 VOFA+ 在帧中间提前切帧。波形上某通道恒为 0 时，先查源变量是否除零或溢出。
 - `LOG()` 在 FireWater 下与波形共用 0 号通道，同时用会污染数据流；
   在 JustFloat 下被编译期禁用，且**参数不会求值**，别把副作用写进 LOG 参数。
+  `VOFA_RTT_SendStr()` 同样只在 FireWater 下发送，但它是真函数，JustFloat 下参数照常求值。
+- 改了本包的 `vofa_rtt.c` / `log_demo.c` 后，在本包目录跑 `sh tests/run_tests.sh` 做主机回归
+  （需主机 gcc，不用上板），最后一行 `ALL PASSED` 才算通过。`tests/` 不拷进用户工程。
 - `start_rtt.bat` 是 bat + PowerShell 5.1 混合单文件，**故意全 ASCII 无中文**：GBK 中文会导致 CMD
   和 PowerShell 5.1 解析错乱，改脚本时别加中文。
 - 脚本启动时会结束残留的 `JLink.exe` / `openocd.exe`，**会顺带结束 IDE 里正在跑的同名调试会话**。

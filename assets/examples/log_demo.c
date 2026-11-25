@@ -20,6 +20,10 @@
 #include "log_demo.h"
 #include "vofa_rtt.h"
 
+/* 编译期检查：LOG_CH_MAX 超过 VOFA_CH_MAX 时，全开的帧会被 VOFA_RTT_Send 整帧丢弃，
+   这里直接让编译报错（数组长度为 -1）。typedef 写法兼容 C90 */
+typedef char LOG_CH_MAX_must_not_exceed_VOFA_CH_MAX[(LOG_CH_MAX <= VOFA_CH_MAX) ? 1 : -1];
+
 /* 行缓冲：RTT 下行缓冲仅 BUFFER_SIZE_DOWN(默认16) 字节，命令要跨多次读取拼接 */
 #define LOG_LINE_MAX 32
 
@@ -32,7 +36,7 @@ static uint32_t s_mask = 0; // 已开启项，bit N 对应 LOG_ID_N
 static void LogCmdExec(const char *line, uint8_t len)
 {
     uint8_t i;
-    uint8_t id;
+    unsigned id;
     uint8_t hasDigit;
 
     /* 前缀不符直接丢弃，避免误触发 */
@@ -50,7 +54,10 @@ static void LogCmdExec(const char *line, uint8_t len)
         id = 0;
         hasDigit = 0;
         while (i < len && line[i] >= '0' && line[i] <= '9') {
-            id = (uint8_t)(id * 10 + (line[i] - '0'));
+            /* 已超出 0..31 就不再累加，后面判为无效号；否则长数字会回绕成小号误触发
+               （如截成 uint8 时 257 变成 1） */
+            if (id < 32)
+                id = id * 10 + (unsigned)(line[i] - '0');
             hasDigit = 1;
             i++;
         }
@@ -75,20 +82,25 @@ static void LogCmdPoll(void)
 {
     static char s_line[LOG_LINE_MAX];
     static uint8_t s_len = 0;
+    static uint8_t s_drop = 0; // 当前行已超长，丢到行尾为止
 
     char ch;
 
     while (SEGGER_RTT_Read(VOFA_RTT_BUF_IDX, &ch, 1) > 0) {
         /* '\r' 和 '\n' 都当行结束，兼容上位机只发其中一种的情况 */
         if (ch == '\n' || ch == '\r') {
-            if (s_len > 0) {
+            if (s_len > 0 && !s_drop)
                 LogCmdExec(s_line, s_len);
-                s_len = 0;
-            }
+            s_len = 0;
+            s_drop = 0;
+        } else if (s_drop) {
+            /* 超长行的剩余部分整段丢弃：若从中间重新开始拼，
+               行尾恰好是 "AT+..." 时会被当成一条新命令执行 */
         } else if (s_len < LOG_LINE_MAX) {
             s_line[s_len++] = ch;
         } else {
-            s_len = 0; // 超长行判为无效，丢弃重新同步
+            s_len = 0; // 超长行判为无效
+            s_drop = 1;
         }
     }
 }
@@ -96,11 +108,12 @@ static void LogCmdPoll(void)
 /* 打印已开启项，同一周期的多项拼成一行输出 */
 static void LogPrint(void)
 {
-    if (s_mask == 0)
-        return;
-
+    /* 声明必须在 return 之前：Keil AC5 默认 C90，语句之后再声明会报 #268 */
     float ch[LOG_CH_MAX];
     unsigned n = 0;
+
+    if (s_mask == 0)
+        return;
 
     /* ------------------------------------------------------------------
      * 以下为示例取值，移植时替换成自己工程的变量。

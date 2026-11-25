@@ -33,6 +33,7 @@ SEGGER RTT + VOFA+ 实时波形输出的自包含移植包。经 J-Link、CMSIS-
 | 组合 | 状态 |
 |------|------|
 | STM32F407VE（Cortex-M4）、STM32G070RB（Cortex-M0+）+ Keil AC6 + J-Link V864（旧版单工具脚本） | 已实测 |
+| 固件组帧、丢帧返回值、下行命令解析 | 主机测试覆盖，见「主机测试」。FireWater 定点转换改成每位只做一次除法后输出与旧版逐字节一致（主机比对），尚未重新上板 |
 | STM32G070RB + Horco CMSIS-DAP v2 + 本脚本 | 已实测：自动识别；100 / 200 帧每秒无坏帧；编译即下载（含内容没变时跳过）；另一个 OpenOCD 真实烧录时自动让出并接回；`flash` 模式；拔插探针、杀后台进程后自动恢复；全程 VOFA+ 侧不断开。测试固件用的是 JustFloat，脚本只原样转发字节，与协议无关。编译即下载是用"写出 `.axf` / `.elf`"模拟编译测的，没在 Keil / EIDE 里真实编译 |
 | J-Link + 本脚本 | 未实测 |
 | ST-Link、只有 v1(HID) 的 CMSIS-DAP + 本脚本 | 未实测 |
@@ -57,8 +58,9 @@ VOFA_RTT_Pack/
 │   │   └── log_demo.c/.h    # 可选：下行 AT 命令动态开关日志项的模板
 │   └── scripts/
 │       └── start_rtt.bat    # 唯一的主机端脚本
-└── references/
-    └── porting.md           # Keil / EIDE / CMake 构建配置、下载配置
+├── references/
+│   └── porting.md           # Keil / EIDE / CMake 构建配置、下载配置
+└── tests/                   # 主机端回归测试，改固件后在 PC 上跑，不用上板
 ```
 
 ## 配置项一览
@@ -66,7 +68,7 @@ VOFA_RTT_Pack/
 | 改哪里 | 管什么 | 什么时候要改 | 详见 |
 |--------|--------|--------------|------|
 | `start_rtt.bat` 开头的 `set` 行 | 调试器类型、芯片、OpenOCD 目标与 RAM 范围、编译即下载、端口、复位、工具路径 | 每个新工程都要核对 | 第 3 步 |
-| `vofa_rtt.h` | 协议、最大通道数、小数位、自检波形 | 换协议、加通道 | 「接口」 |
+| `vofa_rtt.h` | 协议、最大通道数、小数位、自检波形、毫秒时基 | 换协议、加通道、非 HAL 工程 | 「接口」 |
 | `SEGGER_RTT_Conf.h` | 缓冲区大小、通道数、缓冲满时的处理方式、临界区屏蔽优先级、内存段 | RAM 紧张、用 RTOS、H7 等带缓存的芯片 | 「RTT 底层配置」 |
 | `log_demo.h` / `log_demo.c`（可选） | 观察项编号表、全开时的通道数、命令行长度 | 用下行命令时 | 「可选：下行命令」 |
 | VOFA+ 界面 | 数据接口、IP、端口、数据格式 | 每次连接 | 第 5 步 |
@@ -101,7 +103,8 @@ FireWater 的数据用任意 TCP 调试工具连 `127.0.0.1:19021` 就能肉眼�
 出问题时能立刻分清是发送端没发对还是上位机配错了；JustFloat 一片二进制，排查全靠猜。
 
 **该切 JustFloat 的三种情况**：采样率到 kHz 级；目标是 Cortex-M0/M0+（无 FPU 且
-无硬件除法，float 转 ASCII 单通道实测约 28us，是 RTT 写入本身的几十倍）；
+无硬件除法，float 转 ASCII 单通道实测约 28us，是 RTT 写入本身的几十倍；这是减少除法次数之前测的，
+现在会少一些，未重测）；
 需要完整 float 精度或数值超出定点量程。
 
 ## 两种用法
@@ -136,7 +139,7 @@ Keil / EIDE / CMake / Makefile 的具体改法见 **`references/porting.md`**，
 | 参数 | 默认 | 谁用 | 说明 |
 |------|------|------|------|
 | `PROBE` | `auto` | 全部 | `auto` 按 J-Link → ST-Link → CMSIS-DAP 顺序识别；同时插了多种时写死 `jlink` / `cmsis-dap` / `stlink` |
-| `DEVICE` | `STM32F407VE` | J-Link | SEGGER 器件名，一般是去掉封装/温度后缀的型号，**改成自己的芯片**。写错连不上目标 |
+| `DEVICE` | `STM32G070RB` | J-Link | SEGGER 器件名，一般是去掉封装/温度后缀的型号，**改成自己的芯片**（如 F407VET6 填 `STM32F407VE`）。默认值与下面 OpenOCD 的几项是同一颗 G070。写错连不上目标 |
 | `TARGETCFG` | `target/stm32g0x.cfg` | CMSIS-DAP / ST-Link | OpenOCD 目标脚本，默认值对应 STM32G070RB，**改成自己的芯片**，如 `target/stm32f4x.cfg` |
 | `RAM_START` / `RAM_SIZE` | `0x20000000` / `0x9000` | CMSIS-DAP / ST-Link | 控制块搜索范围，必须覆盖 `_SEGGER_RTT`。默认是 G070 的 36KB SRAM（F407VE 用 `0x20000000` / `0x20000`）。最稳：从 `.map` 查 `_SEGGER_RTT` 地址填 `RAM_START`，`RAM_SIZE` 填 `0x100` |
 | `AUTOFLASH` | `1` | CMSIS-DAP / ST-Link | 1 = 编译即下载；0 = 关闭 |
@@ -165,8 +168,9 @@ int main(void)
 }
 ```
 
-非 HAL 工程要把 `vofa_rtt.c` 里 `VOFA_RTT_TestLoop()` 的 `HAL_GetTick()`
-换成自己的毫秒计时源，或直接删掉这个测试函数。
+非 HAL 工程把 `vofa_rtt.h` 末尾的 `VOFA_TICK_HEADER`（默认 `"main.h"`）和 `VOFA_GET_TICK_MS()`
+（默认 `HAL_GetTick()`）两行改成自己的头文件和毫秒计时函数，`vofa_rtt.c` 不用动。
+这两行只给自检函数 `VOFA_RTT_TestLoop()` 用。
 
 **发送必须节流**，主循环裸跑不节流会灌满缓冲导致丢帧。参考 `TestLoop` 的 tick
 节流写法，或放固定周期定时器回调里。单帧大小：FireWater 约 (小数位+7)×通道数 字节，
@@ -244,16 +248,26 @@ OpenOCD 的 Tcl 端口也是固定的，所以不支持同时接多块板各开�
 ## 接口
 
 ```c
-void VOFA_RTT_Init(void);                               // 初始化
-void VOFA_RTT_Send1(float ch0);                         // 单通道
-void VOFA_RTT_Send2(float ch0, float ch1);              // 双通道
-void VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道
-void VOFA_RTT_TestLoop(void);                           // 自检正弦波，可删
+void VOFA_RTT_Init(void);                                   // 初始化
+unsigned VOFA_RTT_Send1(float ch0);                         // 单通道
+unsigned VOFA_RTT_Send2(float ch0, float ch1);              // 双通道
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num); // N 通道
+VOFA_SEND(a, b, c);                                         // 任意个通道一行发，不用建数组（需 C99）
+void VOFA_RTT_TestLoop(void);                               // 自检正弦波，可删
 
-LOG("fmt", ...);                                        // printf 风格文本打印
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len);   // 原样发字节，不加帧格式
+unsigned VOFA_RTT_SendStr(const char *s);                   // 发字符串（仅 FireWater）
+LOG("fmt", ...);                                            // printf 风格文本打印（仅 FireWater）
 ```
 
 这套接口**两种协议下完全一致**，切协议不用改任何调用代码。
+`SendStr` 和 `LOG` 在 JustFloat 下不发送任何内容，原因见下方 LOG 一节。
+
+发送接口都返回写入的字节数，**0 表示这一帧被丢弃**（缓冲满或参数无效），可以用来统计丢帧；不关心就忽略。
+
+`VOFA_SEND(...)` 的参数按 float 转换（`int`、`double` 都行），每个只求值一次；参数个数超过 `VOFA_CH_MAX`
+时直接编译报错，不会等到运行时整帧丢弃。它依赖 C99 复合字面量：Keil AC5 要勾选
+`Options for Target` → `C/C++` → `C99 Mode`，否则这个宏不存在；AC6 / GCC 默认即可。
 
 `vofa_rtt.h` 里可调：
 
@@ -264,6 +278,7 @@ LOG("fmt", ...);                                        // printf 风格文本�
 | `VOFA_DECIMALS` | 3 | 每通道小数位数，调大帧变长。**仅 FireWater 用到** |
 | `VOFA_TEST_PERIOD_MS` | 10 | 自检波形周期，即采样率 100Hz |
 | `VOFA_SINE_FREQ_HZ` / `VOFA_SINE_AMP` | 1.0 / 100 | 自检正弦的频率和幅值 |
+| `VOFA_TICK_HEADER` / `VOFA_GET_TICK_MS()` | `"main.h"` / `HAL_GetTick()` | 自检波形节流用的毫秒时基（返回 `uint32_t`，允许回绕）。非 HAL 工程改成自己的头文件和函数 |
 
 另有两个宏**不要改**：`VOFA_RTT_BUF_IDX`（固定 0，脚本只转发 0 号通道）、`VOFA_NUM_MAX`（由 `VOFA_DECIMALS` 自动算出）。
 
@@ -280,7 +295,7 @@ LOG("fmt", ...);                                        // printf 风格文本�
 | `BUFFER_SIZE_DOWN` | 16 | 0 号下行缓冲，收下行命令。命令比它长也没关系，`log_demo` 会跨次拼行 |
 | `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | 上行通道数，只用 0 号。想把文本挪到 1 号通道时改成 2（脚本只转发 0 号，1 号要用 J-Link RTT Viewer 看） |
 | `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | 下行通道数，只用 0 号 |
-| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | `LOG()` 用的栈上缓冲，写满自动分段发送。调大一次发得更完整，但占更多栈 |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 128 | `LOG()` 用的栈上缓冲（SEGGER 原默认 64）。单行不超过它就一次写入，中断里的波形帧插不进行中间；超过则分段发送。调大更稳，但每次 `LOG()` 占更多栈 |
 | `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | 缓冲满时怎么办：`NO_BLOCK_SKIP` 整帧丢弃（推荐）；`NO_BLOCK_TRIM` 能写多少写多少，会产生半帧，波形协议别用；`BLOCK_IF_FIFO_FULL` 等到有空间，没开脚本时会卡死主循环。**注意 `VOFA_RTT_Init()` 会把 0 号通道强制设成 `NO_BLOCK_SKIP`，改这个宏对 0 号不起作用**，真要改得改 `vofa_rtt.c` 里那一行 |
 | `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | 仅 M3/M4/M7/M33：写 RTT 时用 `BASEPRI` 屏蔽优先级寄存器值 ≥ 它的中断（STM32 的 4 位优先级下即优先级 2~15）。优先级 0、1 的中断不会被屏蔽，**这些中断里不要调用 RTT**。用 FreeRTOS 时一般设成 `configMAX_SYSCALL_INTERRUPT_PRIORITY`。M0/M0+ 没有这项，直接关全局中断 |
 | `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = 用逐字节拷贝代替 `memcpy`，数据量很小时略快，一般不用动 |
@@ -300,6 +315,13 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 **`%f` 是本包给 `SEGGER_RTT_printf` 补的**，SEGGER 原版不支持。定点实现，
 默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 `Inf`/`NaN` 标记而不是静默回绕。
+
+单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧
+插不进这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行会分段写入，失去这个保证。
+
+不需要格式化的固定文本用 `VOFA_RTT_SendStr("motor start\n")`，整串一次写入、没有格式化开销，
+规则与 `LOG()` 相同（仅 FireWater）。要发自定义二进制内容用 `VOFA_RTT_SendRaw(buf, len)`，
+两种协议都可用，但 JustFloat 下必须自己保证写的是完整帧。
 
 ⚠️ **FireWater 下 LOG 与波形共用 0 号通道**，混进来的文本会被当成数据行，
 波形上表现为乱跳的点。**采集波形期间不要开 LOG，两者择一。**
@@ -332,7 +354,7 @@ AT+0\n      全部关闭
 | 项 | 位置 | 默认 | 说明 |
 |----|------|------|------|
 | `LOG_ID_xxx` | `log_demo.h` | 1~4 是示例 | 观察项编号。**有效范围 1~31**（32 位掩码，每号占 1 bit，超出的号被忽略），0 固定表示全部关闭 |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，否则整帧被丢弃 |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，超过时编译报错 |
 | `LOG_LINE_MAX` | `log_demo.c` | 32 | 一条命令最多多少字符，超长的整条命令作废 |
 | 命令格式 | `log_demo.c` | `AT+` | 前缀固定为 `AT+`，号之间用逗号、空格等任意非数字字符分隔，以回车或换行结束 |
 
@@ -352,7 +374,8 @@ AT+0\n      全部关闭
 | 波形全是乱跳巨值 / 通道错位 | 协议选反，或 JustFloat 下有文本混入数据流 |
 | 波形里混入乱跳的点 | FireWater 下 `LOG()` 文本混进了数据流，采集时关掉 LOG |
 | `LOG()` 完全没输出 | 当前是 JustFloat，LOG 被编译期禁用，这是预期行为 |
-| 某帧完全没出现 | `ch_num > VOFA_CH_MAX` 整帧被丢，调大 `VOFA_CH_MAX` |
+| 某帧完全没出现 | `ch_num > VOFA_CH_MAX` 整帧被丢，调大 `VOFA_CH_MAX`；缓冲满也会整帧丢，发送接口返回 0 即是被丢的帧 |
+| 某通道一直是 0 | 源变量是 Inf/NaN（除零、未初始化等），两种协议都会把它发成 0，查这个变量的计算 |
 | 数值精度不够 / 大数被截到上限 | 调大 `VOFA_DECIMALS`；或切 JustFloat 得完整 float |
 | 发 AT 命令没反应 | 没周期调 `LogTask()`，或发送时没带换行 |
 | 编译后没有自动下载 | 脚本不在工程目录（或其上层）、输出不是 `.axf` / `.elf`、`AUTOFLASH=0`、内容没变被跳过、脚本正处于暂停 / 让出状态 |
@@ -365,6 +388,19 @@ AT+0\n      全部关闭
 | 编译报 undefined reference | `SEGGER_RTT.c` 没加进编译 |
 
 更完整的排查表见 `SKILL.md`。
+
+## 主机测试
+
+改了 `vofa_rtt.c` / `log_demo.c` 后，可以先在 PC 上跑回归测试，不用上板：
+
+```sh
+sh tests/run_tests.sh
+```
+
+需要主机 gcc（Windows 上用 MinGW gcc + Git Bash）。脚本把 `assets/` 下的源码复制到临时目录，
+按 FireWater 3 位小数、FireWater 0 位小数、JustFloat 三种配置各编译运行一次，直接读 RTT 上行缓冲比对输出字节；
+另外检查 C90 兼容（模拟 Keil AC5 对声明位置的限制），以及 `VOFA_SEND` 参数超过 `VOFA_CH_MAX` 时必须编译报错。
+最后一行是 `ALL PASSED` 即全部通过。
 
 ## 设计要点
 
@@ -395,10 +431,12 @@ AT+0\n      全部关闭
   只在内核已经 halt 时才 `resume`。默认轮询 100ms 太慢，脚本改成 10ms。
 - **默认 FireWater 是为了可读性**：波形不对时能直接用文本工具看原始数值，
   不用猜是发送端错了还是上位机解析配错了。代价是 float→ASCII 的转换开销。
-  本包不调 C 库 `sprintf`（体积大），自带定点转换 `VOFA_FloatToStr()`，只做整数除法取位。
-  即便如此**也不要放进电流环等高频中断**。
-- **JustFloat 省的是格式化开销，不是传输开销**：它直接 memcpy 原始字节。
-  在 M0/M0+ 上差距最明显——float 转 ASCII 单通道实测约 28us，
+  本包不调 C 库 `sprintf`（体积大），自带定点转换 `VOFA_FloatToStr()`，只做整数除法取位：
+  每个十进制位只调一次除法，符号、NaN/Inf、越界都按 float 的位模式判断，在无硬件除法和 FPU 的
+  M0/M0+ 上尽量少调库函数。即便如此**也不要放进电流环等高频中断**。
+- **JustFloat 省的是格式化开销，不是传输开销**：它按字节拷贝原始 float，只把 Inf/NaN 置 0
+  （`+Inf` 的字节与帧尾 `00 00 80 7F` 相同，原样发出会让 VOFA+ 在帧中间提前切帧）。
+  在 M0/M0+ 上差距最明显——float 转 ASCII 单通道实测约 28us（减少除法次数之前测的，未重测），
   而 RTT 写入本身只要约 1~2us，格式化才是真瓶颈。
 - **两种协议共用一套发送接口**，`VOFA_RTT_Send()` 按 `VOFA_PROTOCOL` 条件编译成
   两个实现之一，另一个连同其辅助函数一起被裁掉，不占 Flash 也不会报 unused 警告。
@@ -407,7 +445,8 @@ AT+0\n      全部关闭
 - **JustFloat 依赖小端序**：ARM Cortex-M 默认小端，满足；大端平台需逐通道字节翻转，
   本包未做。
 - **JustFloat 下文本与波形绝对不能混流**：文本字节会被当 float 解析，或撞上帧尾
-  `00 00 80 7F` 导致此后所有通道错位。所以 `LOG()` 在该协议下被编译期禁用。
+  `00 00 80 7F` 导致此后所有通道错位。所以 `LOG()` 在该协议下被编译期禁用，
+  `VOFA_RTT_SendStr()` 也不发送。
 - **脚本是 bat + PowerShell 混合的单文件，故意全 ASCII 无中文**：GBK 中文会导致 CMD 和
   PowerShell 5.1 解析错乱，别加中文。
 - **脚本启动时会结束残留的 `JLink.exe` / `openocd.exe`**，会顺带结束 IDE 里正在跑的同名调试会话。

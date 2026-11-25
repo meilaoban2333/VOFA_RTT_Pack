@@ -32,7 +32,9 @@ set PROBE=auto
 REM ---- J-Link only: SEGGER device name ----
 REM  CHANGE THIS to your own MCU. Use the SEGGER device name
 REM  (usually the part number without package/temp suffix).
-set DEVICE=STM32F407VE
+REM  The default is STM32G070RB, the same chip as the OpenOCD defaults below;
+REM  e.g. STM32F407VE for an STM32F407VET6.
+set DEVICE=STM32G070RB
 
 REM ---- CMSIS-DAP / ST-Link only (OpenOCD) ----
 REM  CHANGE THESE to your own MCU. The defaults are for STM32G070RB.

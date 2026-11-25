@@ -38,6 +38,7 @@ The host side is a single script, `start_rtt.bat`. Double-click it and:
 | Setup | Status |
 |-------|--------|
 | STM32F407VE (Cortex-M4), STM32G070RB (Cortex-M0+) + Keil AC6 + J-Link V864 (previous single-tool script) | Tested |
+| Firmware framing, drop return values, downlink command parsing | Covered by the host tests, see "Host tests". After the FireWater fixed-point conversion was changed to one division per digit, its output matches the old version byte for byte (compared on the host); not yet re-tested on a board |
 | STM32G070RB + Horco CMSIS-DAP v2 + this script | Tested: probe detection; 100 / 200 frames/s with no bad frames; build-and-download (including skipping an unchanged build); yielding to and resuming after another OpenOCD that really programs the chip; `flash` mode; recovery after unplugging the probe and after the backend process is killed; VOFA+ stays connected throughout. The test firmware used JustFloat; the script relays the bytes unchanged and does not depend on the protocol. Build-and-download was tested by writing out an `.axf` / `.elf` to simulate a build, not with a real Keil / EIDE build |
 | J-Link + this script | Not tested |
 | ST-Link, CMSIS-DAP with only a v1 (HID) interface + this script | Not tested |
@@ -62,8 +63,9 @@ VOFA_RTT_Pack/
 │   │   └── log_demo.c/.h    # optional: template for toggling log items with downlink AT commands
 │   └── scripts/
 │       └── start_rtt.bat    # The only host-side script
-└── references/
-    └── porting.md           # Keil / EIDE / CMake build and download setup (Chinese)
+├── references/
+│   └── porting.md           # Keil / EIDE / CMake build and download setup (Chinese)
+└── tests/                   # Host-side regression tests, run on the PC after firmware changes, no board needed
 ```
 
 ## Settings at a glance
@@ -71,7 +73,7 @@ VOFA_RTT_Pack/
 | Where | What it controls | When to change it | Details |
 |-------|------------------|-------------------|---------|
 | The `set` lines at the top of `start_rtt.bat` | Probe type, chip, OpenOCD target and RAM range, build-and-download, ports, reset, tool paths | Check for every new project | Step 3 |
-| `vofa_rtt.h` | Protocol, max channels, decimals, self-test waveform | Switching protocol, adding channels | "API" |
+| `vofa_rtt.h` | Protocol, max channels, decimals, self-test waveform, millisecond tick | Switching protocol, adding channels, non-HAL projects | "API" |
 | `SEGGER_RTT_Conf.h` | Buffer sizes, channel counts, what happens when the buffer is full, critical-section mask priority, memory sections | Tight RAM, an RTOS, chips with caches such as the H7 | "Low-level RTT settings" |
 | `log_demo.h` / `log_demo.c` (optional) | Watched-item ID table, channel count with everything on, command line length | When using downlink commands | "Optional: downlink commands" |
 | VOFA+ UI | Data interface, IP, port, data format | Every connection | Step 5 |
@@ -108,7 +110,8 @@ RTT Viewer), so when something is wrong you can tell at once whether the sender 
 at fault; JustFloat is a binary blob and debugging it is guesswork.
 
 **Three cases for JustFloat**: sample rates in the kHz range; a Cortex-M0/M0+ target (no FPU and no
-hardware divider, so float-to-ASCII takes about 28 us per channel, tens of times the RTT write itself);
+hardware divider, so float-to-ASCII took about 28 us per channel, tens of times the RTT write itself;
+measured before the number of divisions was reduced, now somewhat less, not re-measured);
 full float precision or values beyond the fixed-point range.
 
 ## Two ways to use it
@@ -145,7 +148,7 @@ chip-related values need filling in:
 | Parameter | Default | Used by | Meaning |
 |-----------|---------|---------|---------|
 | `PROBE` | `auto` | All | `auto` checks for J-Link, then ST-Link, then CMSIS-DAP. With several probes plugged in, set `jlink` / `cmsis-dap` / `stlink` |
-| `DEVICE` | `STM32F407VE` | J-Link | SEGGER device name, usually the part number without package/temperature suffix. **Change it to your chip.** A wrong name means no connection |
+| `DEVICE` | `STM32G070RB` | J-Link | SEGGER device name, usually the part number without package/temperature suffix. **Change it to your chip** (e.g. `STM32F407VE` for an F407VET6). The default is the same G070 as the OpenOCD settings below. A wrong name means no connection |
 | `TARGETCFG` | `target/stm32g0x.cfg` | CMSIS-DAP / ST-Link | OpenOCD target script; the default is for STM32G070RB. **Change it to your chip**, e.g. `target/stm32f4x.cfg` |
 | `RAM_START` / `RAM_SIZE` | `0x20000000` / `0x9000` | CMSIS-DAP / ST-Link | Search range for the control block, must cover `_SEGGER_RTT`. The default is the 36 KB SRAM of the G070 (F407VE: `0x20000000` / `0x20000`). Most reliable: put the `_SEGGER_RTT` address from the `.map` file in `RAM_START` and `0x100` in `RAM_SIZE` |
 | `AUTOFLASH` | `1` | CMSIS-DAP / ST-Link | 1 = build-and-download on, 0 = off |
@@ -174,8 +177,9 @@ int main(void)
 }
 ```
 
-In a non-HAL project, replace `HAL_GetTick()` in `VOFA_RTT_TestLoop()` (in `vofa_rtt.c`) with your own
-millisecond tick, or delete the test function.
+In a non-HAL project, change the two lines `VOFA_TICK_HEADER` (default `"main.h"`) and `VOFA_GET_TICK_MS()`
+(default `HAL_GetTick()`) at the end of `vofa_rtt.h` to your own header and millisecond tick function;
+`vofa_rtt.c` stays as it is. Only the self-test function `VOFA_RTT_TestLoop()` uses them.
 
 **Throttle the sending.** An unthrottled main loop fills the buffer and frames get dropped. Use the tick
 throttling in `TestLoop` as a template, or send from a fixed-period timer callback. Frame size: FireWater
@@ -263,16 +267,28 @@ processes, and the OpenOCD Tcl port is fixed, so several boards with one script 
 ## API
 
 ```c
-void VOFA_RTT_Init(void);                               // init
-void VOFA_RTT_Send1(float ch0);                         // one channel
-void VOFA_RTT_Send2(float ch0, float ch1);              // two channels
-void VOFA_RTT_Send(const float *data, unsigned ch_num); // N channels
-void VOFA_RTT_TestLoop(void);                           // self-test sine wave, can be removed
+void VOFA_RTT_Init(void);                                   // init
+unsigned VOFA_RTT_Send1(float ch0);                         // one channel
+unsigned VOFA_RTT_Send2(float ch0, float ch1);              // two channels
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num); // N channels
+VOFA_SEND(a, b, c);                                         // any number of channels in one line, no array (C99)
+void VOFA_RTT_TestLoop(void);                               // self-test sine wave, can be removed
 
-LOG("fmt", ...);                                        // printf-style text printing
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len);   // send raw bytes, no framing
+unsigned VOFA_RTT_SendStr(const char *s);                   // send a string (FireWater only)
+LOG("fmt", ...);                                            // printf-style text printing (FireWater only)
 ```
 
 **The API is identical for both protocols**; switching protocols needs no change in the calling code.
+`SendStr` and `LOG` send nothing under JustFloat; see the LOG section below for why.
+
+The send functions return the number of bytes written; **0 means the frame was dropped** (buffer full or
+invalid arguments), which you can use to count dropped frames. Ignore it if you do not care.
+
+`VOFA_SEND(...)` converts its arguments to float (`int` and `double` are fine) and evaluates each once.
+More arguments than `VOFA_CH_MAX` is a compile error, rather than a frame silently dropped at run time.
+It needs C99 compound literals: in Keil AC5 tick `Options for Target` → `C/C++` → `C99 Mode`, otherwise the
+macro does not exist; AC6 / GCC work by default.
 
 Tunable in `vofa_rtt.h`:
 
@@ -283,6 +299,7 @@ Tunable in `vofa_rtt.h`:
 | `VOFA_DECIMALS` | 3 | Decimals per channel; more makes frames longer. **FireWater only** |
 | `VOFA_TEST_PERIOD_MS` | 10 | Self-test period, i.e. 100 Hz sample rate |
 | `VOFA_SINE_FREQ_HZ` / `VOFA_SINE_AMP` | 1.0 / 100 | Frequency and amplitude of the self-test sine |
+| `VOFA_TICK_HEADER` / `VOFA_GET_TICK_MS()` | `"main.h"` / `HAL_GetTick()` | Millisecond tick for throttling the self-test (returns `uint32_t`, may wrap). Change to your own header and function in a non-HAL project |
 
 Two more macros must **not** be changed: `VOFA_RTT_BUF_IDX` (fixed at 0, the script only relays channel 0)
 and `VOFA_NUM_MAX` (derived from `VOFA_DECIMALS`).
@@ -302,7 +319,7 @@ when you replace the file with a newer version.
 | `BUFFER_SIZE_DOWN` | 16 | Down-buffer 0, receiving downlink commands. Longer commands are fine; `log_demo` assembles the line across reads |
 | `SEGGER_RTT_MAX_NUM_UP_BUFFERS` | 1 | Number of up-channels; only channel 0 is used. Set 2 to move text to channel 1 (the script only relays channel 0, so view channel 1 in J-Link RTT Viewer) |
 | `SEGGER_RTT_MAX_NUM_DOWN_BUFFERS` | 1 | Number of down-channels; only channel 0 is used |
-| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 64 | Stack buffer used by `LOG()`; flushed in pieces when full. Larger means more complete writes but more stack |
+| `SEGGER_RTT_PRINTF_BUFFER_SIZE` | 128 | Stack buffer used by `LOG()` (SEGGER's default is 64). A line that fits is written in one go, so a waveform frame sent from an interrupt cannot land in the middle of it; longer lines are sent in pieces. Larger is safer but every `LOG()` call uses more stack |
 | `SEGGER_RTT_MODE_DEFAULT` | `SEGGER_RTT_MODE_NO_BLOCK_SKIP` | What happens when the buffer is full: `NO_BLOCK_SKIP` drops the whole frame (recommended); `NO_BLOCK_TRIM` writes what fits and produces half frames, so do not use it with a waveform protocol; `BLOCK_IF_FIFO_FULL` waits for space and hangs the main loop when the script is not running. **Note that `VOFA_RTT_Init()` forces channel 0 to `NO_BLOCK_SKIP`, so this macro has no effect on channel 0**; change that line in `vofa_rtt.c` if you really need another mode |
 | `SEGGER_RTT_MAX_INTERRUPT_PRIORITY` | 0x20 | M3/M4/M7/M33 only: while writing RTT, `BASEPRI` masks interrupts whose priority register value is ≥ this (with STM32's 4 priority bits, priorities 2–15). Priority 0 and 1 interrupts are not masked, **so do not call RTT from them**. With FreeRTOS this is usually set to `configMAX_SYSCALL_INTERRUPT_PRIORITY`. M0/M0+ have no such setting and disable interrupts globally |
 | `SEGGER_RTT_MEMCPY_USE_BYTELOOP` | 0 | 1 = copy byte by byte instead of `memcpy`, slightly faster for very small amounts; usually leave it |
@@ -323,6 +340,15 @@ Supports `%c %d %u %x %X %s %p %f %F %%`, with the `-` `0` `+` `#` flags, field 
 **`%f` was added to `SEGGER_RTT_printf` by this pack**; the SEGGER original does not support it. It is a
 fixed-point implementation with 6 decimals by default and a range of ±4294967295; values beyond that or NaN
 print an `Inf`/`NaN` marker instead of silently wrapping.
+
+Output of up to 128 bytes per call (`SEGGER_RTT_PRINTF_BUFFER_SIZE`) is written to RTT in one go: a
+waveform frame sent from an interrupt cannot land in the middle of the line, and when the buffer is full the
+whole line is dropped rather than half of it. Longer lines are written in pieces and lose this guarantee.
+
+For fixed text that needs no formatting, use `VOFA_RTT_SendStr("motor start\n")`: the whole string is
+written at once with no formatting cost, under the same rules as `LOG()` (FireWater only). For custom
+binary content use `VOFA_RTT_SendRaw(buf, len)`, which works under both protocols; under JustFloat you must
+make sure you write complete frames yourself.
 
 ⚠️ **Under FireWater, LOG shares channel 0 with the waveform.** Text that gets mixed in is parsed as data
 lines and shows up as stray points. **Do not use LOG while capturing waveforms; pick one.**
@@ -359,7 +385,7 @@ periodically, every 20–50 ms.
 | Item | Where | Default | Meaning |
 |------|-------|---------|---------|
 | `LOG_ID_xxx` | `log_demo.h` | 1–4 are examples | Watched-item IDs. **Valid range 1–31** (a 32-bit mask with one bit per ID; larger IDs are ignored); 0 always means "all off" |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX` or the whole frame is dropped |
+| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX`, otherwise the build fails |
 | `LOG_LINE_MAX` | `log_demo.c` | 32 | Maximum characters per command; a longer command is discarded entirely |
 | Command format | `log_demo.c` | `AT+` | The prefix is always `AT+`; IDs are separated by any non-digit character (comma, space, ...) and the line ends with CR or LF |
 
@@ -380,7 +406,8 @@ so AT commands work under JustFloat too.
 | Wildly jumping huge values / shifted channels | Wrong protocol selected, or text mixed into the JustFloat stream |
 | Stray points in the waveform | `LOG()` text mixed into the FireWater stream; turn LOG off while capturing |
 | `LOG()` prints nothing at all | The protocol is JustFloat and LOG is disabled at compile time; this is expected |
-| A frame never shows up | `ch_num > VOFA_CH_MAX`, the whole frame is dropped; raise `VOFA_CH_MAX` |
+| A frame never shows up | `ch_num > VOFA_CH_MAX`, the whole frame is dropped; raise `VOFA_CH_MAX`. A full buffer drops whole frames too; a send function returning 0 marks a dropped frame |
+| A channel is always 0 | The source variable is Inf/NaN (division by zero, uninitialised, ...); both protocols send it as 0. Check how that variable is computed |
 | Not enough precision / large values clipped | Raise `VOFA_DECIMALS`, or switch to JustFloat for full floats |
 | AT commands do nothing | `LogTask()` is not called periodically, or the command was sent without a newline |
 | No download after a build | The script is not in the project folder (or above it), the output is not `.axf` / `.elf`, `AUTOFLASH=0`, the image is unchanged and was skipped, or the script is paused / has yielded the probe |
@@ -393,6 +420,20 @@ so AT commands work under JustFloat too.
 | `undefined reference` at link time | `SEGGER_RTT.c` is not in the build |
 
 `SKILL.md` (Chinese) has a longer troubleshooting table.
+
+## Host tests
+
+After changing `vofa_rtt.c` / `log_demo.c` you can run the regression tests on the PC first, no board needed:
+
+```sh
+sh tests/run_tests.sh
+```
+
+This needs a host gcc (on Windows, MinGW gcc + Git Bash). The script copies the sources under `assets/` to a
+temporary folder, builds and runs them in three configurations (FireWater with 3 decimals, FireWater with
+0 decimals, JustFloat) and compares the bytes in the RTT up buffer. It also checks C90 compatibility
+(simulating Keil AC5's rule on where declarations may go) and that `VOFA_SEND` with more arguments than
+`VOFA_CH_MAX` fails to compile. A last line of `ALL PASSED` means everything passed.
 
 ## Design notes
 
@@ -435,11 +476,16 @@ Worth reading before changing anything:
 - **FireWater is the default for readability**: when the waveform looks wrong you can read the raw values
   in a text tool instead of guessing whether the sender or the host's parser is misconfigured. The price is
   the float→ASCII conversion. The pack does not call the C library's `sprintf` (too big) and uses its own
-  fixed-point `VOFA_FloatToStr()`, which only does integer division. Even so, **do not put it in a
-  current loop or other high-rate interrupt**.
-- **JustFloat saves formatting cost, not transfer cost**: it copies the raw bytes with memcpy. The
-  difference is largest on M0/M0+ — float-to-ASCII takes about 28 us per channel while the RTT write
-  itself takes about 1-2 us, so formatting is the real bottleneck.
+  fixed-point `VOFA_FloatToStr()`, which only does integer division: one division per decimal digit, and
+  the sign, NaN/Inf and overflow checks use the float's bit pattern, so an M0/M0+ without a hardware
+  divider or FPU calls as few library routines as possible. Even so, **do not put it in a current loop or
+  other high-rate interrupt**.
+- **JustFloat saves formatting cost, not transfer cost**: it copies the raw float bytes and only replaces
+  Inf/NaN with 0 (the bytes of `+Inf` equal the frame tail `00 00 80 7F`, so sending it as is would make
+  VOFA+ cut the frame early). The
+  difference is largest on M0/M0+ — float-to-ASCII took about 28 us per channel (measured before the
+  number of divisions was reduced, not re-measured since) while the RTT write itself takes about 1-2 us,
+  so formatting is the real bottleneck.
 - **Both protocols share one sending API.** `VOFA_RTT_Send()` compiles into one of two implementations
   depending on `VOFA_PROTOCOL`; the other one and its helpers are dropped, costing no flash and raising no
   unused warnings.
@@ -450,7 +496,7 @@ Worth reading before changing anything:
   platforms would need per-channel byte swapping, which this pack does not do.
 - **Text and waveform must never share a JustFloat stream**: text bytes would be parsed as floats, or hit
   the frame tail `00 00 80 7F` and shift every channel from then on. That is why `LOG()` is disabled at
-  compile time for this protocol.
+  compile time for this protocol, and `VOFA_RTT_SendStr()` sends nothing.
 - **The script is a single batch + PowerShell hybrid file and is deliberately ASCII only.** GBK text breaks
   both CMD and PowerShell 5.1 parsing; do not add Chinese text to it.
 - **At startup the script ends leftover `JLink.exe` / `openocd.exe` processes**, which also ends an IDE

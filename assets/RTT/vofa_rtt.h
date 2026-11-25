@@ -25,7 +25,7 @@
  *
  * J-Link Commander 手动操作（start_rtt.bat 已自动完成，仅供手工排查参考）：
  *   J-Link>connect
- *   Device>STM32F407VE      <- 只填器件名，改成自己的芯片型号
+ *   Device>STM32G070RB      <- 只填器件名，改成自己的芯片型号
  *   TIF>S
  *   Speed>4000
  *   J-Link>rtt start
@@ -51,7 +51,9 @@
  *   一帧 = ch_num 个 4 字节小端 float，后接 4 字节固定帧尾 00 00 80 7F，
  *   例如双通道：[f0:4B][f1:4B][00 00 80 7F]
  *   VOFA+ 按帧尾切分，帧内字节数除以 4 即通道数，无需额外握手。
- *   优点：直接 memcpy 原始字节，无任何数值转换，开销仅 memcpy；帧也更小。
+ *   优点：按字节拷贝原始 float，不做格式化，开销仅 memcpy 级；帧也更小。
+ *         唯一的处理是 Inf/NaN 置 0：+Inf 的字节与帧尾 00 00 80 7F 相同，
+ *         原样发出会让 VOFA+ 在帧中间提前切帧。
  *   代价：流里是二进制，RTT Viewer 看是乱码；依赖小端序（ARM Cortex-M 默认
  *         满足，移植到大端平台要逐通道字节翻转）；不能与 LOG() 共用通道，
  *         故 JustFloat 下 LOG() 被编译期禁用，详见下方 LOG 一节。
@@ -61,7 +63,8 @@
  *     1) 采样率要求高（kHz 级），格式化开销扛不住；
  *     2) 目标是 Cortex-M0/M0+，无 FPU 且无硬件除法，float 转 ASCII 单通道
  *        实测约 28us，是 RTT 写入本身(memcpy 约 1~2us)的几十倍——
- *        此时格式化而非传输才是真正的瓶颈。
+ *        此时格式化而非传输才是真正的瓶颈。（28us 是改成每位只做一次除法之前
+ *        测的，现在会少一些，尚未重新实测）
  * ------------------------------------------------------------------------- */
 #define VOFA_PROTO_FIREWATER    0
 #define VOFA_PROTO_JUSTFLOAT    1
@@ -79,20 +82,53 @@
 #define VOFA_DECIMALS           3
 /* 单个数值的最大字符数：符号 1 + 整数位 10 + 小数点 1 + 小数位 VOFA_DECIMALS */
 #define VOFA_NUM_MAX            (12 + VOFA_DECIMALS)
+/* 10^VOFA_DECIMALS 必须在 uint32 内，超过 9 会溢出出乱码 */
+#if (VOFA_DECIMALS < 0) || (VOFA_DECIMALS > 9)
+#error "VOFA_DECIMALS must be 0..9"
+#endif
 #endif
 
 /* 初始化：0 号通道由 SEGGER_RTT_Init 预置，这里只做显式初始化，需在 main() 前段调用 */
 void VOFA_RTT_Init(void);
 
 /* 推送一帧数据，data 指向 ch_num 个 float（ch_num <= VOFA_CH_MAX）。
-   帧格式由 VOFA_PROTOCOL 决定，调用方式两种协议完全一致 */
-void VOFA_RTT_Send(const float *data, unsigned ch_num);
+   帧格式由 VOFA_PROTOCOL 决定，调用方式两种协议完全一致。
+   返回写入字节数；0 表示整帧被丢弃（参数无效，或缓冲剩余空间不够），
+   可用来统计丢帧，不关心时忽略返回值即可 */
+unsigned VOFA_RTT_Send(const float *data, unsigned ch_num);
 
-/* 推送单通道的便捷接口 */
-void VOFA_RTT_Send1(float ch0);
+/* 推送单通道的便捷接口，返回值同 VOFA_RTT_Send */
+unsigned VOFA_RTT_Send1(float ch0);
 
-/* 推送双通道的便捷接口 */
-void VOFA_RTT_Send2(float ch0, float ch1);
+/* 推送双通道的便捷接口，返回值同 VOFA_RTT_Send */
+unsigned VOFA_RTT_Send2(float ch0, float ch1);
+
+/* 一行发任意个通道，不用先建数组：VOFA_SEND(speed, iq, id_ref);
+   参数按 float 转换（int、double 都行），每个只求值一次，返回值同 VOFA_RTT_Send。
+   参数个数超过 VOFA_CH_MAX 时编译报错（数组长度为负），不会等到运行时整帧丢弃。
+   依赖 C99 复合字面量，C90 下不提供：Keil AC5 要勾选
+   Options for Target -> C/C++ -> C99 Mode，AC6 / GCC 默认即可 */
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L)
+/* 参数个数：sizeof 只看复合字面量的类型，不对参数求值 */
+#define VOFA_ARG_NUM(...)       (sizeof((const float[]){__VA_ARGS__}) / sizeof(float))
+#define VOFA_SEND(...) \
+    VOFA_RTT_Send((const float[]){__VA_ARGS__}, \
+                  (unsigned)(VOFA_ARG_NUM(__VA_ARGS__) + \
+                             0u * sizeof(char[(VOFA_ARG_NUM(__VA_ARGS__) <= VOFA_CH_MAX) ? 1 : -1])))
+#endif
+
+/* 原样发送 len 字节，不加任何帧格式（自定义帧、预先格式化好的文本等）。
+   整块一次写入：缓冲剩余空间不够时整块丢弃，不会只写半截；
+   len 超过 BUFFER_SIZE_UP - 1 必然被丢弃。
+   返回实际写入字节数，0 表示被丢弃或参数无效。
+   JustFloat 下内容会直接混进二进制流，调用方必须自己保证写的是完整帧 */
+unsigned VOFA_RTT_SendRaw(const void *buf, unsigned len);
+
+/* 发送 '\0' 结尾的字符串，整串一次写入，丢弃规则同 VOFA_RTT_SendRaw。
+   适合发不需要格式化的固定日志，比 LOG() 省掉格式化开销。
+   与 LOG() 一样只在 FireWater 下生效；JustFloat 下不发送、返回 0（原因见 LOG 一节）。
+   它是真函数，JustFloat 下参数照常求值，这点与 LOG() 不同 */
+unsigned VOFA_RTT_SendStr(const char *s);
 
 /* 主循环里调用，内部按 VOFA_TEST_PERIOD_MS 节流后发送正弦波测试数据 */
 void VOFA_RTT_TestLoop(void);
@@ -108,7 +144,10 @@ void VOFA_RTT_TestLoop(void);
  *   %f 是本工程给 SEGGER_RTT_printf 补的（原版不支持），定点输出，
  *   默认 6 位小数，量程 ±4294967295，超出或 NaN 打印 Inf/NaN 标记。
  *
- * 输出长度不受限：内部 64 字节缓冲写满会自动 flush，长字符串照样完整输出。
+ * 单条输出不超过 SEGGER_RTT_PRINTF_BUFFER_SIZE（本包设为 128，见 SEGGER_RTT_Conf.h）
+ * 字节时一次写入 RTT：中断里的波形帧插不进这一行中间，缓冲满时整条丢弃而不是
+ * 只写半截。超过的部分会分段写入，内容仍完整，但失去上面两点保证。
+ * 该缓冲在栈上，每次调用 LOG 占用这么多栈。
  *
  * ★ 与协议的关系（两种协议下行为不同，务必看清）：
  *
@@ -146,5 +185,11 @@ void VOFA_RTT_TestLoop(void);
 #define VOFA_SINE_FREQ_HZ       1.0f
 /* 测试正弦波幅值 */
 #define VOFA_SINE_AMP           100.0f
+
+/* 毫秒时基，只有 VOFA_RTT_TestLoop 节流用到，返回 uint32_t、允许回绕。
+   默认 STM32 HAL 的 HAL_GetTick()，声明在 main.h；该头文件只在 vofa_rtt.c 里包含。
+   非 HAL 工程把两行一起改掉，如 "board.h" 和 millis()，不用再动 vofa_rtt.c */
+#define VOFA_TICK_HEADER        "main.h"
+#define VOFA_GET_TICK_MS()      HAL_GetTick()
 
 #endif /* __VOFA_RTT_H */
