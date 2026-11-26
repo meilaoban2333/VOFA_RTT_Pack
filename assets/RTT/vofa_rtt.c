@@ -20,6 +20,7 @@ static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1
  * @note  只做定点转换，不支持科学计数法：VOFA+ 波形观察的量程有限，
  *        定点足够且避免引入 C 库 sprintf（体积大且可能不可重入）。
  *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
+ *        |v| × 10^VOFA_DECIMALS 超出 32 位时去掉小数只输出整数，|v| >= 2^32 饱和到 4294967295。
  *        M0/M0+ 无 FPU 也无硬件除法，浮点比较和整数除法都是库函数调用，
  *        所以符号、NaN/Inf、越界都按位模式判断，每个十进制位只做一次除法。
  */
@@ -34,6 +35,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	float    scaled_f;
 #if (VOFA_DECIMALS > 0)
 	unsigned k;
+	unsigned int_only;/*带小数放不下 32 位，只输出整数部分*/
 #endif
 
 	/*经 memcpy 取位模式，避免指针强转违反严格别名规则*/
@@ -59,19 +61,32 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	  与数值同序，位模式 >= 0x4F800000 即 >= 2^32，免去一次软件浮点比较*/
 	scaled_f = v * VOFA_Scale[VOFA_DECIMALS] + 0.5f;
 	memcpy(&bits, &scaled_f, 4u);
+#if (VOFA_DECIMALS > 0)
+	/*带小数放不进 32 位时（3 位小数即 v 超过约 429 万）改为只输出整数，量程扩到 2^32。
+	  float 在 2^22 以上分辨率已 >= 0.5，去掉小数不丢有效信息*/
+	int_only = (bits >= 0x4F800000u);
+	if (int_only)
+	{
+		scaled_f = v + 0.5f;
+		memcpy(&bits, &scaled_f, 4u);
+	}
+#endif
 	scaled = (bits >= 0x4F800000u) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
 
 	/*从最低位起逆序取数：先定长 VOFA_DECIMALS 位小数（不足补零），再整数部分。
 	  余数用"原值 - 商*10"求，每位只调一次除法：分开写 /10 和 %10 时，
 	  实测 GCC 14 在 M0+ 上会各调一次库函数，并不合并*/
 #if (VOFA_DECIMALS > 0)
-	for (k = 0; k < VOFA_DECIMALS; k++)
+	if (!int_only)
 	{
-		q = scaled / 10u;
-		rev[n++] = (char)('0' + (scaled - q * 10u));
-		scaled = q;
+		for (k = 0; k < VOFA_DECIMALS; k++)
+		{
+			q = scaled / 10u;
+			rev[n++] = (char)('0' + (scaled - q * 10u));
+			scaled = q;
+		}
+		rev[n++] = '.';
 	}
-	rev[n++] = '.';
 #endif
 	do
 	{

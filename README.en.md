@@ -101,7 +101,7 @@ relays the bytes unchanged, so the script needs no change for either protocol.
 | Readable in a text tool | ✅ yes | ❌ garbage |
 | `LOG()` text printing | ✅ available (pollutes the waveform, use one or the other) | ❌ disabled at compile time |
 | Precision | 3 decimals (`VOFA_DECIMALS`) | full float |
-| Very large values | saturate beyond the fixed-point range | no limit |
+| Very large values | with 3 decimals, values above about 4.29 million drop the decimals; beyond ±4294967295 they saturate | no limit |
 | Needs little-endian | no | yes (ARM Cortex-M is) |
 
 **Recommendation: get it working with FireWater first, check the values, then switch to JustFloat if
@@ -524,9 +524,11 @@ Worth reading before changing anything:
 - **Both protocols share one sending API.** `VOFA_RTT_Send()` compiles into one of two implementations
   depending on `VOFA_PROTOCOL`; the other one and its helpers are dropped, costing no flash and raising no
   unused warnings.
-- **FireWater's fixed-point conversion has no scientific notation**: values beyond the range saturate to
-  the limit and NaN/Inf become 0 to keep the frame structure intact. If the range is too small, scale on
-  the MCU before sending, or switch to JustFloat.
+- **FireWater's fixed-point conversion has no scientific notation**: the limit with `VOFA_DECIMALS`
+  decimals is about 4.29×10^9 / 10^decimals (about 4.29 million with 3 decimals). Above it the decimals
+  are dropped and only the integer is sent (a float that large has no fractional precision anyway);
+  beyond ±4294967295 the value saturates to the limit. NaN/Inf become 0 to keep the frame structure
+  intact. If the range is too small, scale on the MCU before sending, or switch to JustFloat.
 - **JustFloat relies on little-endian byte order**: ARM Cortex-M is little-endian by default; big-endian
   platforms would need per-channel byte swapping, which this pack does not do.
 - **Text and waveform must never share a JustFloat stream**: text bytes would be parsed as floats, or hit

@@ -143,8 +143,14 @@ int main(void)
     VOFA_RTT_Send1(-INFINITY);        EXPECT_STR("Send1 -Inf -> 0", "0\n");
     /* 4294967*1000 舍入成 float 是 4294967040，仍小于 2^32，不应饱和 */
     VOFA_RTT_Send1(4294967.0f);       EXPECT_STR("Send1 just below 2^32", "4294967.040\n");
-    VOFA_RTT_Send1(1e30f);            EXPECT_STR("Send1 huge saturates", "4294967.295\n");
-    VOFA_RTT_Send1(-1e30f);           EXPECT_STR("Send1 -huge saturates", "-4294967.295\n");
+    /* 值 × 10^小数位 超出 32 位时去掉小数只输出整数，整数也超出才饱和 */
+    VOFA_RTT_Send1(1e30f);            EXPECT_STR("Send1 huge saturates", "4294967295\n");
+    VOFA_RTT_Send1(-1e30f);           EXPECT_STR("Send1 -huge saturates", "-4294967295\n");
+    VOFA_RTT_Send1(4294968.0f);       EXPECT_STR("Send1 above 2^32/1000 -> int", "4294968\n");
+    VOFA_RTT_Send1(5000000.0f);       EXPECT_STR("Send1 5e6 -> int", "5000000\n");
+    VOFA_RTT_Send1(-5000000.0f);      EXPECT_STR("Send1 -5e6 -> int", "-5000000\n");
+    VOFA_RTT_Send1(4000000000.0f);    EXPECT_STR("Send1 4e9 -> int", "4000000000\n");
+    VOFA_RTT_Send1(5e9f);             EXPECT_STR("Send1 5e9 saturates", "4294967295\n");
 
     /* 通道数满 VOFA_CH_MAX 且每个数都是最长写法，验证组帧缓冲够大 */
     {
@@ -154,7 +160,7 @@ int main(void)
         exp[0] = 0;
         for (i = 0; i < VOFA_CH_MAX; i++) {
             v[i] = -1e30f;
-            strcat(exp, i ? ",-4294967.295" : "-4294967.295");
+            strcat(exp, i ? ",-4294967295" : "-4294967295");
         }
         strcat(exp, "\n");
         expect_uint("Send max channels ret", VOFA_RTT_Send(v, VOFA_CH_MAX), (unsigned)strlen(exp));
@@ -301,6 +307,11 @@ int main(void)
     expect_uint("hook line exactly LOG_LINE_MAX", t_hookLen, 32);
     LogSetCmdHook(0);
     LogInit(t_items, T_NUM(t_items));
+
+    /* 大的 u32 经 log_demo 发出，走整数输出而不是饱和 */
+    feed("AT+0\n"); LogInit(t_types, T_NUM(t_types)); t_u32 = 4000000000u;
+    feed("AT+2\n");          LogTask(); EXPECT_STR("u32 4e9 via log_demo", "4000000000\n");
+    feed("AT+0\n"); LogInit(t_items, T_NUM(t_items));
 #endif
 
 #if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 0)
