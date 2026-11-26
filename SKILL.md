@@ -102,7 +102,7 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 | `SEGGER_RTT_Conf.h` | RTT 配置 | **可能要改**，见步骤 4 |
 | `vofa_rtt.c/.h` | 双协议组帧封装层 + `LOG()` 宏 | **选协议**，按需改通道数/小数位 |
 
-`assets/examples/` 下另有可选的 `log_demo.c/.h`（下行命令动态开关日志项），
+`assets/examples/` 下另有可选的 `log_demo.c/.h`（下行命令动态开关观察项，用户只在自己文件里写变量表，这两个文件不改），
 不需要运行时开关可以不拷，见步骤 7。
 
 `vofa_rtt.c` 经 `vofa_rtt.h` 末尾的 `VOFA_TICK_HEADER`（默认 `"main.h"`）拿 `VOFA_GET_TICK_MS()`
@@ -260,10 +260,10 @@ VOFA+ 靠 4 字节帧尾 `00 00 80 7F` 切帧、帧内每 4 字节当一个 floa
   `SEGGER_RTT_MAX_NUM_UP_BUFFERS` 调到 2，J-Link 下用 RTT Viewer 看 Terminal 1；
   注意 `start_rtt.bat` 只转发 0 号通道，VOFA+ 收不到 1 号）。
 
-## 步骤 7（可选）：下行命令动态开关日志项
+## 步骤 7（可选）：下行命令动态开关观察项
 
-`assets/examples/log_demo.c/.h` 是一个模板：把要观察的变量分组编号，
-运行时发命令开关，不用改代码重新烧录就能切换看哪几组波形。
+`assets/examples/log_demo.c/.h` 让用户把要观察的变量登记成一张 `LogItem` 表，
+运行时发命令开关，不用改代码重新烧录就能切换看哪几组波形。**这两个文件本身不用改**，表写在用户自己的文件里。
 
 **两种协议都能用，本文件不用改**：它输出时调的是 `VOFA_RTT_Send()`，帧格式自动
 跟随 `VOFA_PROTOCOL`；命令走的是 RTT **下行**通道，与上行波形协议无关，
@@ -277,28 +277,48 @@ AT+1\n      -> 切换 1 号项
 AT+1,2\n    -> 同时切换 1 号和 2 号，两项都开就一起打印
 AT+1\n      -> 再发一次同样的号即关闭该项（每个号独立翻转）
 AT+0\n      -> 全部关闭
+AT+KP=1.5\n -> 不是上面的格式，交给 LogSetCmdHook 注册的回调（没注册就丢弃）
 ```
+
+编号按表顺序自动分配，第 1 行是 1 号；一帧里的通道顺序就是表顺序。
 
 移植方法：
 
 1. 拷 `log_demo.c/.h` 进工程，`.c` 加入编译（与步骤 2 同样的做法）
-2. 改 `log_demo.h` 里的 `LOG_ID_xxx` 表为自己的观察项
-3. 改 `log_demo.c` 里 `LogPrint()` 的取值代码为自己的变量
-4. 更新 `LOG_CH_MAX` 为全开时的通道总数，并确认 **`LOG_CH_MAX <= VOFA_CH_MAX`**（超过时 `log_demo.c` 编译报错）
-5. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）
+2. 在用户自己的文件里写表，每行一个观察项，宏按变量类型选
+   `LOG_F32` / `LOG_I32` / `LOG_U32` / `LOG_I16` / `LOG_U16` / `LOG_I8` / `LOG_U8`，参数是 `(变量, 通道数)`：
+
+   ```c
+   #include "log_demo.h"
+   static const LogItem s_logItems[] = {
+       LOG_F32(g_angle, 1),     // 1 号
+       LOG_F32(g_iabc,  3),     // 2 号：数组前 3 个元素
+       LOG_U16(g_adcVbus, 1),   // 3 号：整数发送时转成 float
+   };
+   ```
+
+   通道数为 0、超过 `VOFA_CH_MAX`、或超出变量大小（如 `short` 变量用了 `LOG_F32`）时编译报错
+3. `VOFA_RTT_Init()` 之后调 `LogInit(s_logItems, sizeof(s_logItems) / sizeof(s_logItems[0]))`；
+   需要自定义命令（如 `AT+KP=1.5`）时再 `LogSetCmdHook(回调)`，回调参数 `(const char *line, unsigned len)`，`line` 以 `'\0'` 结尾
+4. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）
+
+可配置项（`log_demo.h`，都可在编译选项里覆盖）：`LOG_ITEM_MAX`（最多登记项数，默认 64）、
+`LOG_LINE_MAX`（一条命令最多字符数，默认 32）。打开某项后一帧会超过 `VOFA_CH_MAX` 时这次打开不生效，
+所以表里可以登记远多于 `VOFA_CH_MAX` 的项，按需开一部分。
+绝对值超过 16777216 的 32 位整数转 float 会丢精度；登记的变量要自然对齐（packed 结构体成员不行）。
 
 实现要点，改的时候别破坏：
 
-- **位掩码翻转**：每个项目号占 1 bit，收到号就异或，所以多项天然可叠加，同号发两次即关。
+- **位图翻转**：每项占 1 bit，收到号就翻转，所以多项天然可叠加，同号发两次即关。
 - **跨次读取组行**：RTT 下行缓冲只有 `BUFFER_SIZE_DOWN`(默认 16) 字节，
   一条命令可能分几次才读全，所以要自己拼行缓冲，不能一次读到就当完整命令。
 - **不回显开关状态**：上行是纯数据流，回一句 "CH1 ON"，FireWater 下会被当成数据行，
   JustFloat 下更会破坏帧对齐，两种协议都不能回显。
-- **通道顺序 = 项目号从小到大**：顺序乱了上位机的曲线就对不上号。
+- **通道顺序 = 表顺序**：编号就是表里的行号，所以曲线和编号天然对得上。
 - **整帧一次性写入**：分次 `VOFA_RTT_Send` 会被拆散，上位机解析错位。
 - **通道数随开关变化**：开的项不同，每帧通道数就不同。FireWater 下 VOFA+ 能自动
   适应（按逗号数），JustFloat 下也能（按帧长除以 4），但曲线的对应关系会变，
-  切换观察项后记得重新对照 `LOG_ID_xxx` 表看曲线。
+  切换观察项后记得重新对照表看曲线。
 
 ## 步骤 8：开服务 + VOFA+ 配置
 
@@ -376,7 +396,7 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
 | 数值精度不够 | FireWater 的 `VOFA_DECIMALS` 默认 3 位 | 调大 `VOFA_DECIMALS`；或换 JustFloat 得到完整精度 |
 | 大数值显示成固定上限 | FireWater 超出定点量程被饱和 | MCU 侧先缩放（如除以 1000）；或换 JustFloat |
 | `%f` 打印出 `Inf`/`NaN` | 超出 ±4294967295 或本身非有限 | 检查源变量，或先缩放 |
-| 发 AT 命令没反应 | 没调 `LogTask()`，或命令没带 `\n` | 确认周期调用；VOFA+ 发送框要勾上换行 |
+| 发 AT 命令没反应 | 没调 `LogInit()`、没调 `LogTask()`，或命令没带 `\n`；号超出表的项数、或打开后会超 `VOFA_CH_MAX` 也不生效 | 确认已登记表并周期调用；VOFA+ 发送框要勾上换行 |
 | 挂 Keil 调试后波形停 | 调试器 halt 了内核 | 全速运行后恢复；流式采集时少打断点 |
 | `flash` 报 `J-Link found` | J-Link 不需要外部工具下载 | Keil 用回 J-Link 驱动即可 |
 

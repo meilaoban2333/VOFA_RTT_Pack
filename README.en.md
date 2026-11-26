@@ -60,7 +60,7 @@ VOFA_RTT_Pack/
 │   │   ├── SEGGER_RTT_printf.c   # %f support added (the SEGGER original has none)
 │   │   └── vofa_rtt.c/.h         # dual-protocol framing layer + LOG() macro, protocol macro lives here
 │   ├── examples/
-│   │   └── log_demo.c/.h    # optional: template for toggling log items with downlink AT commands
+│   │   └── log_demo.c/.h    # optional: toggle watched items with downlink AT commands (you only write a variable table)
 │   └── scripts/
 │       └── start_rtt.bat    # The only host-side script
 ├── references/
@@ -75,7 +75,7 @@ VOFA_RTT_Pack/
 | The `set` lines at the top of `start_rtt.bat` | Probe type, chip, OpenOCD target and RAM range, build-and-download, ports, reset, tool paths | Check for every new project | Step 3 |
 | `vofa_rtt.h` | Protocol, max channels, decimals, self-test waveform, millisecond tick | Switching protocol, adding channels, non-HAL projects | "API" |
 | `SEGGER_RTT_Conf.h` | Buffer sizes, channel counts, what happens when the buffer is full, critical-section mask priority, memory sections | Tight RAM, an RTOS, chips with caches such as the H7 | "Low-level RTT settings" |
-| `log_demo.h` / `log_demo.c` (optional) | Watched-item ID table, channel count with everything on, command line length | When using downlink commands | "Optional: downlink commands" |
+| A `LogItem` table in your own project (optional) | Variables to watch, their types and channel counts; `log_demo.c/.h` themselves need no changes | When using downlink commands | "Optional: downlink commands" |
 | VOFA+ UI | Data interface, IP, port, data format | Every connection | Step 5 |
 
 The script also has some fixed values (internal port, check intervals and so on); see "Script command line
@@ -366,28 +366,63 @@ relays channel 0, so VOFA+ never sees channel 1).
 
 ## Optional: toggling watched items with downlink commands
 
-`assets/examples/log_demo.c/.h` is a template: number your watched items in groups and toggle them with
-commands at run time, so you can change which waveforms you watch without editing code and reflashing.
+`assets/examples/log_demo.c/.h` lets you register the variables you want to watch in a table and toggle
+them with commands at run time, so you can change which waveforms you watch without editing code and
+reflashing. `log_demo.c/.h` themselves need no changes; the table lives in your own file.
 Commands are sent from the VOFA+ send box and `start_rtt.bat` relays them to the RTT downlink channel
-(with J-Link also from the RTT Viewer input line):
+(with J-Link also from the RTT Viewer input line).
+
+```c
+#include "log_demo.h"
+
+static const LogItem s_logItems[] = {
+    LOG_F32(g_angle, 1),     // item 1: electrical angle
+    LOG_F32(g_iabc,  3),     // item 2: three phase currents (first 3 array elements)
+    LOG_U16(g_adcVbus, 1),   // item 3: raw bus-voltage ADC value, sent as float
+    LOG_I32(g_speed, 2),     // item 4: first 2 array elements
+};
+
+/* Optional: handle non-toggle commands; line is '\0'-terminated, newline removed */
+static void MyCmd(const char *line, unsigned len) { /* parse it yourself, e.g. AT+KP=1.5 */ }
+
+int main(void)
+{
+    VOFA_RTT_Init();
+    LogInit(s_logItems, sizeof(s_logItems) / sizeof(s_logItems[0]));
+    LogSetCmdHook(MyCmd);
+    for (;;) {
+        /* every 20-50 ms */
+        LogTask();
+    }
+}
+```
+
+Items are numbered in table order, the first row being item 1; the channel order within a frame is the
+table order. Commands:
 
 ```
 AT+1\n      toggle item 1
-AT+1,2\n    toggle items 1 and 2; when both are on they print together
+AT+1,2\n    toggle items 1 and 2; when both are on they share one frame
 AT+1\n      the same number again turns it off (each number toggles independently)
 AT+0\n      turn everything off
+AT+KP=1.5\n not the format above, so it goes to the LogSetCmdHook callback (dropped if none is set)
 ```
-
-When porting, change three things: the `LOG_ID_xxx` table in `log_demo.h`, the value-reading code in
-`LogPrint()` in `log_demo.c`, and `LOG_CH_MAX` (must be ≤ `VOFA_CH_MAX`). Then call `LogTask()`
-periodically, every 20–50 ms.
 
 | Item | Where | Default | Meaning |
 |------|-------|---------|---------|
-| `LOG_ID_xxx` | `log_demo.h` | 1–4 are examples | Watched-item IDs. **Valid range 1–31** (a 32-bit mask with one bit per ID; larger IDs are ignored); 0 always means "all off" |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | Total channels per frame with everything on; must be ≤ `VOFA_CH_MAX`, otherwise the build fails |
-| `LOG_LINE_MAX` | `log_demo.c` | 32 | Maximum characters per command; a longer command is discarded entirely |
-| Command format | `log_demo.c` | `AT+` | The prefix is always `AT+`; IDs are separated by any non-digit character (comma, space, ...) and the line ends with CR or LF |
+| `LOG_F32` / `LOG_I32` / `LOG_U32` / `LOG_I16` / `LOG_U16` / `LOG_I8` / `LOG_U8` | `log_demo.h` | — | Table-entry macros `(variable, channels)`; the variable can be a scalar or an array. Integers are sent as float. **Compile-time check**: the build fails when the channel count is 0, exceeds `VOFA_CH_MAX`, or exceeds the variable's size (e.g. `LOG_F32` on a `short`) |
+| `LOG_ITEM_MAX` | `log_demo.h` | 64 | Maximum number of registered items; extra entries are ignored. One bit per item; can be overridden in the compiler options |
+| `LOG_LINE_MAX` | `log_demo.h` | 32 | Maximum characters per command; a longer command is discarded entirely (also applies to the callback) |
+| Channel limit | — | `VOFA_CH_MAX` | Turning an item on is ignored when the frame would then exceed `VOFA_CH_MAX` channels, so the table can hold far more items than `VOFA_CH_MAX` and you turn on a subset |
+| Command format | `log_demo.c` | `AT+` | A line is a toggle command only if `AT+` is followed by digits, commas and spaces (at least one digit), ending with CR or LF; every other non-empty line goes to the callback |
+
+Notes:
+
+- 32-bit integers with a magnitude above 16777216 lose precision when converted to float (VOFA+ only
+  understands float).
+- Registered variables must be naturally aligned (ordinary globals are); members of packed structs are
+  not, and an unaligned access faults on M0/M0+.
+- The on/off state is not echoed: the uplink is a pure data stream and text would corrupt the waveform.
 
 **Works with both protocols without changes**: output goes through `VOFA_RTT_Send()`, so the frame format
 follows `VOFA_PROTOCOL`; commands use the downlink channel, which is independent of the uplink protocol,
@@ -409,7 +444,7 @@ so AT commands work under JustFloat too.
 | A frame never shows up | `ch_num > VOFA_CH_MAX`, the whole frame is dropped; raise `VOFA_CH_MAX`. A full buffer drops whole frames too; a send function returning 0 marks a dropped frame |
 | A channel is always 0 | The source variable is Inf/NaN (division by zero, uninitialised, ...); both protocols send it as 0. Check how that variable is computed |
 | Not enough precision / large values clipped | Raise `VOFA_DECIMALS`, or switch to JustFloat for full floats |
-| AT commands do nothing | `LogTask()` is not called periodically, or the command was sent without a newline |
+| AT commands do nothing | `LogInit()` was not called to register the table, `LogTask()` is not called periodically, or the command was sent without a newline; an ID beyond the table, or one that would exceed `VOFA_CH_MAX`, is ignored too |
 | No download after a build | The script is not in the project folder (or above it), the output is not `.axf` / `.elf`, `AUTOFLASH=0`, the image is unchanged and was skipped, or the script is paused / has yielded the probe |
 | A build downloaded a different project | Several projects' outputs are below the folder; set `FIRMWARE` |
 | J-Link keeps saying `backend exited` | Wrong `DEVICE` name, or the target is not powered (it connects once powered) |

@@ -91,5 +91,19 @@ printf '#include "vofa_rtt.h"\nunsigned f(void) { return VOFA_SEND(1, 2, 3); }\n
 compile_expect "VOFA_SEND at VOFA_CH_MAX compiles" ok -std=gnu99 -Werror=implicit-function-declaration -I"$WORK/neg" -c "$WORK/neg/ok.c" -o "$WORK/neg/ok.o"
 compile_expect "VOFA_SEND over VOFA_CH_MAX fails" fail -std=gnu99 -Werror=implicit-function-declaration -I"$WORK/neg" -c "$WORK/neg/bad.c" -o "$WORK/neg/bad.o"
 
+# LOG_xxx 表项宏：通道数为 0、超 VOFA_CH_MAX、超出变量大小（含小变量配大类型宏）必须编译报错。
+# 用 gnu90 编，顺带确认宏在 Keil AC5 的 C90 下可用；ok.c 排除因别的原因编不过
+prep lneg
+lneg_cc() {
+    printf '#include "log_demo.h"\nfloat a3[3]; float a9[9]; short s1;\nconst LogItem t[] = { %s };\n' "$3" > "$WORK/lneg/$2.c"
+    compile_expect "$1" "$4" -std=gnu90 -Wall -Werror=declaration-after-statement \
+        -I"$WORK/lneg" -I"$HERE/stub" -c "$WORK/lneg/$2.c" -o "$WORK/lneg/$2.o"
+}
+lneg_cc "LOG_xxx macros compile (C90)"   ok    'LOG_F32(a3, 3), LOG_I16(s1, 1)' ok
+lneg_cc "LOG_F32 n over var size fails"  over  'LOG_F32(a3, 4)' fail
+lneg_cc "LOG_F32 on 2-byte var fails"    small 'LOG_F32(s1, 1)' fail
+lneg_cc "LOG_F32 n == 0 fails"           zero  'LOG_F32(a3, 0)' fail
+lneg_cc "LOG_F32 n > VOFA_CH_MAX fails"  chmax 'LOG_F32(a9, 9)' fail
+
 if [ $rc -eq 0 ]; then echo "ALL PASSED"; else echo "SOME TESTS FAILED"; fi
 exit $rc

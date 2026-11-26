@@ -24,6 +24,29 @@ unsigned __wrap_SEGGER_RTT_Write(unsigned i, const void *p, unsigned n)
     return __real_SEGGER_RTT_Write(i, p, n);
 }
 
+/* log_demo 测试夹具。用非 static 全局：部分配置用不到，static 会报 unused 警告让测试失败 */
+float t_a, t_b3[3], t_c, t_d2[2];
+const LogItem t_items[] = { LOG_F32(t_a, 1), LOG_F32(t_b3, 3), LOG_F32(t_c, 1), LOG_F32(t_d2, 2) };
+int32_t t_i32; uint32_t t_u32; int16_t t_i16; uint16_t t_u16; int8_t t_i8; uint8_t t_u8;
+const LogItem t_types[] = { LOG_I32(t_i32, 1), LOG_U32(t_u32, 1), LOG_I16(t_i16, 1),
+                            LOG_U16(t_u16, 1), LOG_I8(t_i8, 1),   LOG_U8(t_u8, 1) };
+float t_e3[3], t_f3[3], t_g3[3];
+const LogItem t_three[] = { LOG_F32(t_e3, 3), LOG_F32(t_f3, 3), LOG_F32(t_g3, 3) };
+LogItem t_big[70];   /* 运行时填，测超过 31 项和 LOG_ITEM_MAX 截断 */
+float t_big9[9];
+LogItem t_bad[3];    /* 运行时手填的坏表项，绕过 LOG_xxx 宏的编译期检查 */
+#define T_NUM(a) (sizeof(a) / sizeof((a)[0]))
+
+/* 命令回调：记下最后一行和调用次数 */
+char t_hookLine[LOG_LINE_MAX + 1];
+unsigned t_hookLen, t_hookCalls;
+void t_hook(const char *line, unsigned len)
+{
+    strcpy(t_hookLine, line);
+    t_hookLen = len;
+    t_hookCalls++;
+}
+
 static int g_fail, g_pass;
 
 /* 模拟调试器把 0 号上行缓冲读空，返回读到的字节数 */
@@ -63,6 +86,9 @@ static void expect_uint(const char *name, unsigned got, unsigned exp)
     if (got == exp) { g_pass++; printf("  PASS %s\n", name); }
     else { g_fail++; printf("  FAIL %s: got %u, exp %u\n", name, got, exp); }
 }
+/* 检查回调收到的行内容和长度 */
+#define EXPECT_LINE(name, s) \
+    expect_uint(name, (strcmp(t_hookLine, s) == 0 && t_hookLen == strlen(s)) ? 1u : 0u, 1u)
 
 /* 模拟上位机发下行命令。下行缓冲只有 BUFFER_SIZE_DOWN 字节，分小段写入，
    每段后调一次 LogTask() 让固件读走，与实际跨多次轮询拼行一致。
@@ -96,6 +122,11 @@ static void test_full_buffer(void)
 int main(void)
 {
     VOFA_RTT_Init();
+
+    /* 初始化顺序写反：LogInit 之前调 LogTask 不能有输出，下行里已有的命令被安全吃掉 */
+    SEGGER_RTT_WriteDownBuffer(0, "AT+1\n", 5);
+    LogTask(); EXPECT_STR("LogTask before LogInit", "");
+    LogInit(t_items, T_NUM(t_items));
 
 #if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 3)
     printf("[FireWater, VOFA_DECIMALS=3]\n");
@@ -175,7 +206,7 @@ int main(void)
         EXPECT_STR("VOFA_SEND side effect bytes", "0.000\n");
     }
 
-    /* log_demo 下行命令：示例 LogPrint() 每个通道都填 0.0f，按通道数判断开了哪些项 */
+    /* log_demo 下行命令：t_items 的变量都是 0，按通道数判断开了哪些项（1/3/1/2 通道） */
     feed("AT+1\n");          LogTask(); EXPECT_STR("AT+1 -> 1 ch", "0.000\n");
     feed("AT+2,4\n");        LogTask(); EXPECT_STR("AT+2,4 -> 1+3+2 ch",
                                                    "0.000,0.000,0.000,0.000,0.000,0.000\n");
@@ -192,6 +223,84 @@ int main(void)
     LogTask(); EXPECT_STR("overlong line tail not executed", "");
     feed("AT+1\n");          LogTask(); EXPECT_STR("resync after overlong line", "0.000\n");
     feed("AT+0\n");          LogTask(); EXPECT_STR("cleanup", "");
+
+    /* 多类型：整数统一转 float 输出 */
+    LogInit(t_types, T_NUM(t_types));
+    t_i32 = -123456; t_u32 = 3000000u; t_i16 = -300; t_u16 = 65535u; t_i8 = -128; t_u8 = 255u;
+    feed("AT+1,2,3,4,5,6\n"); LogTask();
+    EXPECT_STR("types -> float", "-123456.000,3000000.000,-300.000,65535.000,-128.000,255.000\n");
+    feed("AT+0\n");
+
+    /* 超过 31 项，以及超过 LOG_ITEM_MAX 时只登记前 LOG_ITEM_MAX 项 */
+    {
+        unsigned i;
+        for (i = 0; i < T_NUM(t_big); i++) {
+            t_big[i].addr = &t_a;
+            t_big[i].type = LOG_T_F32;
+            t_big[i].num = 1;
+        }
+    }
+    LogInit(t_big, 40);
+    feed("AT+40\n");         LogTask(); EXPECT_STR("id 40 works", "0.000\n");
+    feed("AT+41\n");         LogTask(); EXPECT_STR("id beyond num ignored", "0.000\n");
+    LogInit(t_big, 70);
+    feed("AT+64\n");         LogTask(); EXPECT_STR("id LOG_ITEM_MAX works", "0.000\n");
+    feed("AT+65\n");         LogTask(); EXPECT_STR("id beyond LOG_ITEM_MAX ignored", "0.000\n");
+    feed("AT+0\n");
+
+    /* 打开后会超 VOFA_CH_MAX 的项拒绝开启；通道顺序 = 表顺序 */
+    {
+        unsigned i;
+        for (i = 0; i < 3; i++) { t_e3[i] = 1.0f; t_f3[i] = 2.0f; t_g3[i] = 3.0f; }
+    }
+    LogInit(t_three, T_NUM(t_three));
+    feed("AT+1,2\n");        LogTask(); EXPECT_STR("6 ch on", "1.000,1.000,1.000,2.000,2.000,2.000\n");
+    feed("AT+3\n");          LogTask(); EXPECT_STR("over VOFA_CH_MAX refused",
+                                                   "1.000,1.000,1.000,2.000,2.000,2.000\n");
+    feed("AT+1\n");          LogTask(); EXPECT_STR("item 1 off", "2.000,2.000,2.000\n");
+    feed("AT+3\n");          LogTask(); EXPECT_STR("now fits, table order",
+                                                   "2.000,2.000,2.000,3.000,3.000,3.000\n");
+
+    /* 重新 LogInit 清空开关；空指针当 0 项 */
+    LogInit(t_items, T_NUM(t_items)); LogTask(); EXPECT_STR("LogInit resets", "");
+    LogInit(0, 5); feed("AT+1\n"); LogTask(); EXPECT_STR("LogInit NULL", "");
+
+    /* 运行时手填的坏表项：通道数 0、超 VOFA_CH_MAX 永远开不了，未知类型输出 0 */
+    t_bad[0].addr = &t_a;   t_bad[0].type = LOG_T_F32; t_bad[0].num = 0;
+    t_bad[1].addr = t_big9; t_bad[1].type = LOG_T_F32; t_bad[1].num = 9;
+    t_bad[2].addr = &t_a;   t_bad[2].type = 99;        t_bad[2].num = 1;
+    t_a = 1.5f;
+    LogInit(t_bad, T_NUM(t_bad));
+    feed("AT+1\n");          LogTask(); EXPECT_STR("runtime item num 0 never on", "");
+    feed("AT+2\n");          LogTask(); EXPECT_STR("runtime item num > VOFA_CH_MAX never on", "");
+    feed("AT+3\n");          LogTask(); EXPECT_STR("runtime item unknown type -> 0", "0.000\n");
+    t_a = 0.0f;
+
+    /* 一次读取里含两条命令，两条都要执行 */
+    LogInit(t_items, T_NUM(t_items));
+    SEGGER_RTT_WriteDownBuffer(0, "AT+1\nAT+2\n", 10);
+    LogTask(); EXPECT_STR("two commands in one chunk", "0.000,0.000,0.000,0.000\n");
+    feed("AT+0\n");
+
+    /* 非开关命令交给回调 */
+    feed("AT+KP=1.5\n");     /* 未设回调：丢弃不崩 */
+    LogSetCmdHook(t_hook);
+    feed("AT+KP=1.5\n");
+    expect_uint("hook called", t_hookCalls, 1);
+    EXPECT_LINE("hook line", "AT+KP=1.5");
+    feed("AT+1x2\n");        LogTask(); EXPECT_STR("AT+1x2 goes to hook, toggles nothing", "");
+    expect_uint("hook AT+1x2", t_hookCalls, 2);
+    feed("AT+\n");           expect_uint("AT+ without digit -> hook", t_hookCalls, 3);
+    feed("AT+ 1\n");         LogTask(); EXPECT_STR("space separator still toggles", "0.000\n");
+    expect_uint("toggle line not hooked", t_hookCalls, 3);
+    feed("AT+0\n");
+    feed("\r\n");            expect_uint("CRLF empty line not hooked", t_hookCalls, 3);
+    feed("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");   /* 33 字符 */
+    expect_uint("overlong line not hooked", t_hookCalls, 3);
+    feed("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");    /* 恰好 32 字符 */
+    expect_uint("hook line exactly LOG_LINE_MAX", t_hookLen, 32);
+    LogSetCmdHook(0);
+    LogInit(t_items, T_NUM(t_items));
 #endif
 
 #if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 0)

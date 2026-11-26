@@ -55,7 +55,7 @@ VOFA_RTT_Pack/
 │   │   ├── SEGGER_RTT_printf.c   # 已补 %f 支持（SEGGER 原版不支持）
 │   │   └── vofa_rtt.c/.h         # 双协议组帧封装层 + LOG() 宏，协议宏也在这
 │   ├── examples/
-│   │   └── log_demo.c/.h    # 可选：下行 AT 命令动态开关日志项的模板
+│   │   └── log_demo.c/.h    # 可选：下行 AT 命令动态开关观察项（只需在自己文件里写变量表）
 │   └── scripts/
 │       └── start_rtt.bat    # 唯一的主机端脚本
 ├── references/
@@ -70,7 +70,7 @@ VOFA_RTT_Pack/
 | `start_rtt.bat` 开头的 `set` 行 | 调试器类型、芯片、OpenOCD 目标与 RAM 范围、编译即下载、端口、复位、工具路径 | 每个新工程都要核对 | 第 3 步 |
 | `vofa_rtt.h` | 协议、最大通道数、小数位、自检波形、毫秒时基 | 换协议、加通道、非 HAL 工程 | 「接口」 |
 | `SEGGER_RTT_Conf.h` | 缓冲区大小、通道数、缓冲满时的处理方式、临界区屏蔽优先级、内存段 | RAM 紧张、用 RTOS、H7 等带缓存的芯片 | 「RTT 底层配置」 |
-| `log_demo.h` / `log_demo.c`（可选） | 观察项编号表、全开时的通道数、命令行长度 | 用下行命令时 | 「可选：下行命令」 |
+| 自己工程里的 `LogItem` 表（可选） | 要观察的变量、类型、通道数；`log_demo.c/.h` 本身不用改 | 用下行命令时 | 「可选：下行命令」 |
 | VOFA+ 界面 | 数据接口、IP、端口、数据格式 | 每次连接 | 第 5 步 |
 
 脚本里还有一些写死的参数（内部端口、各种检测间隔等），见「脚本的命令行与固定参数」。
@@ -337,26 +337,58 @@ FireWater 重新编译，或自行改用 RTT 1 号通道（需把 `SEGGER_RTT_MA
 
 ## 可选：下行命令动态开关观察项
 
-`assets/examples/log_demo.c/.h` 是个模板：把观察项分组编号，运行时发命令开关，
-不用改代码重烧就能换看哪几组波形。命令从 VOFA+ 的发送框发出，经 `start_rtt.bat` 转发到 RTT 下行通道
-（J-Link 下也可以用 RTT Viewer 输入行）：
+`assets/examples/log_demo.c/.h` 让你把要观察的变量登记成一张表，运行时发命令开关，
+不用改代码重烧就能换看哪几组波形。`log_demo.c/.h` 本身不用改，表写在自己的文件里。
+命令从 VOFA+ 的发送框发出，经 `start_rtt.bat` 转发到 RTT 下行通道（J-Link 下也可以用 RTT Viewer 输入行）。
+
+```c
+#include "log_demo.h"
+
+static const LogItem s_logItems[] = {
+    LOG_F32(g_angle, 1),     // 1 号：电角度
+    LOG_F32(g_iabc,  3),     // 2 号：三相电流（数组前 3 个元素）
+    LOG_U16(g_adcVbus, 1),   // 3 号：母线 ADC 原始值，发送时转成 float
+    LOG_I32(g_speed, 2),     // 4 号：数组前 2 个元素
+};
+
+/* 可选：处理非开关类命令，line 以 '\0' 结尾、已去掉换行 */
+static void MyCmd(const char *line, unsigned len) { /* 自己解析，如 AT+KP=1.5 */ }
+
+int main(void)
+{
+    VOFA_RTT_Init();
+    LogInit(s_logItems, sizeof(s_logItems) / sizeof(s_logItems[0]));
+    LogSetCmdHook(MyCmd);
+    for (;;) {
+        /* 每 20~50ms 调一次 */
+        LogTask();
+    }
+}
+```
+
+编号按表顺序自动分配，第 1 行是 1 号；一帧里的通道顺序就是表顺序。命令：
 
 ```
 AT+1\n      切换 1 号项
-AT+1,2\n    同时切换 1、2 号，都开就一起打印
+AT+1,2\n    同时切换 1、2 号，都开就拼在同一帧里打印
 AT+1\n      再发一次同号即关闭（每号独立翻转）
 AT+0\n      全部关闭
+AT+KP=1.5\n 不是上面的格式，交给 LogSetCmdHook 注册的回调（没注册就丢弃）
 ```
-
-移植时改三处：`log_demo.h` 的 `LOG_ID_xxx` 表、`log_demo.c` 里 `LogPrint()` 的取值代码、
-`LOG_CH_MAX`（须 ≤ `VOFA_CH_MAX`）。然后周期调用 `LogTask()`，建议 20~50ms 一次。
 
 | 项 | 位置 | 默认 | 说明 |
 |----|------|------|------|
-| `LOG_ID_xxx` | `log_demo.h` | 1~4 是示例 | 观察项编号。**有效范围 1~31**（32 位掩码，每号占 1 bit，超出的号被忽略），0 固定表示全部关闭 |
-| `LOG_CH_MAX` | `log_demo.h` | 7 | 全部打开时一帧的通道总数，必须 ≤ `VOFA_CH_MAX`，超过时编译报错 |
-| `LOG_LINE_MAX` | `log_demo.c` | 32 | 一条命令最多多少字符，超长的整条命令作废 |
-| 命令格式 | `log_demo.c` | `AT+` | 前缀固定为 `AT+`，号之间用逗号、空格等任意非数字字符分隔，以回车或换行结束 |
+| `LOG_F32` / `LOG_I32` / `LOG_U32` / `LOG_I16` / `LOG_U16` / `LOG_I8` / `LOG_U8` | `log_demo.h` | — | 表项宏 `(变量, 通道数)`，变量可以是单个变量或数组。整数发送时转成 float。**编译期检查**：通道数为 0、超过 `VOFA_CH_MAX`、或超出变量大小（如 `short` 变量用了 `LOG_F32`）时编译报错 |
+| `LOG_ITEM_MAX` | `log_demo.h` | 64 | 最多登记多少项，超出的表项被忽略；每项开关占 1 bit，可在编译选项里改 |
+| `LOG_LINE_MAX` | `log_demo.h` | 32 | 一条命令最多多少字符，超长的整条命令作废（回调也受此限制） |
+| 通道上限 | — | `VOFA_CH_MAX` | 打开某项后一帧总通道数会超过 `VOFA_CH_MAX` 时，这次打开不生效。所以表里可以登记远多于 `VOFA_CH_MAX` 的项，按需开一部分 |
+| 命令格式 | `log_demo.c` | `AT+` | `AT+` 后只含数字、逗号、空格（至少一个数字）才算开关命令，以回车或换行结束；其余非空行都交给回调 |
+
+注意：
+
+- 绝对值超过 16777216 的 32 位整数转 float 会丢精度（VOFA+ 只认 float）。
+- 登记的变量要自然对齐（普通全局变量都满足）；packed 结构体成员不行，M0/M0+ 上非对齐访问会 HardFault。
+- 不回显开关状态：上行是纯数据流，混文本会破坏波形。
 
 **两种协议都能用，本文件不用改**：输出调的是 `VOFA_RTT_Send()`，帧格式自动跟随
 `VOFA_PROTOCOL`；命令走下行通道，与上行波形协议无关，JustFloat 下 AT 命令照常好使。
@@ -377,7 +409,7 @@ AT+0\n      全部关闭
 | 某帧完全没出现 | `ch_num > VOFA_CH_MAX` 整帧被丢，调大 `VOFA_CH_MAX`；缓冲满也会整帧丢，发送接口返回 0 即是被丢的帧 |
 | 某通道一直是 0 | 源变量是 Inf/NaN（除零、未初始化等），两种协议都会把它发成 0，查这个变量的计算 |
 | 数值精度不够 / 大数被截到上限 | 调大 `VOFA_DECIMALS`；或切 JustFloat 得完整 float |
-| 发 AT 命令没反应 | 没周期调 `LogTask()`，或发送时没带换行 |
+| 发 AT 命令没反应 | 没调 `LogInit()` 登记表、没周期调 `LogTask()`，或发送时没带换行；号超出表的项数，或打开后会超 `VOFA_CH_MAX` 也不生效 |
 | 编译后没有自动下载 | 脚本不在工程目录（或其上层）、输出不是 `.axf` / `.elf`、`AUTOFLASH=0`、内容没变被跳过、脚本正处于暂停 / 让出状态 |
 | 编译后下载了别的工程 | 目录下有多个工程的输出，用 `FIRMWARE` 指定 |
 | J-Link 反复 `backend exited` | `DEVICE` 器件名写错，或目标没上电（上电后会自动连上） |
