@@ -12,7 +12,7 @@ FireWater 下还能用 `LOG()` 打印调试文本；两种协议都能用下行�
 
 主机端只有一个脚本 `assets/scripts/start_rtt.bat`，自动识别调试器、断线自动重连、编译即下载。
 运行环境：Windows 10/11 自带的 cmd + PowerShell 5.1；J-Link 需 J-Link 软件，CMSIS-DAP / ST-Link 需
-OpenOCD 0.12+（EIDE 自带即可）；不需要 Python，不需要管理员权限。完整清单见 README 的"环境要求"。
+OpenOCD 0.12+（EIDE 自带即可）；不需要 Python，不需要管理员权限。完整清单见 `references/manual.md` 的"环境要求"。
 
 ## 数据通路
 
