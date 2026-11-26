@@ -13,6 +13,28 @@
 static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1e7f, 1e8f, 1e9f};
 
 /**
+ * @brief 求 n / 10，只用移位和加法（Hacker's Delight divu10），对全部 32 位输入精确
+ * @note  M0/M0+ 无硬件除法，"/ 10u" 会编译成 __aeabi_uidiv 库调用，这里约 20 条单周期指令。
+ *        M3/M4 上编译器本可用 umull 三条指令完成，统一用本函数只多约 10 条，
+ *        换来主机测试覆盖的就是上板跑的同一份代码
+ */
+static uint32_t VOFA_Div10(uint32_t n)
+{
+	uint32_t q;
+	uint32_t r;
+
+	/*q 先逼近 n * 0.8，右移 3 位得 n / 10 的近似，最多偏小 1*/
+	q = (n >> 1) + (n >> 2);
+	q = q + (q >> 4);
+	q = q + (q >> 8);
+	q = q + (q >> 16);
+	q = q >> 3;
+	/*用余数修正：余数 > 9 说明商偏小 1*/
+	r = n - (((q << 2) + q) << 1);
+	return q + (r > 9u);
+}
+
+/**
  * @brief 把 float 转成定点十进制 ASCII，写入 buf
  * @param buf 输出缓冲，需至少 VOFA_NUM_MAX 字节，不追加结束符
  * @param v   待转换的值
@@ -20,8 +42,10 @@ static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1
  * @note  只做定点转换，不支持科学计数法：VOFA+ 波形观察的量程有限，
  *        定点足够且避免引入 C 库 sprintf（体积大且可能不可重入）。
  *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
+ *        |v| × 10^VOFA_DECIMALS 超出 32 位时减少小数位（|v| >= 2^22 时只输出整数），
+ *        |v| >= 2^32 饱和到 4294967295。
  *        M0/M0+ 无 FPU 也无硬件除法，浮点比较和整数除法都是库函数调用，
- *        所以符号、NaN/Inf、越界都按位模式判断，每个十进制位只做一次除法。
+ *        所以符号、NaN/Inf、越界都按位模式判断，除以 10 用移位加法（VOFA_Div10）。
  */
 static unsigned VOFA_FloatToStr(char *buf, float v)
 {
@@ -34,6 +58,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	float    scaled_f;
 #if (VOFA_DECIMALS > 0)
 	unsigned k;
+	unsigned dec = VOFA_DECIMALS;/*实际输出的小数位数，放不下 32 位时减少*/
 #endif
 
 	/*经 memcpy 取位模式，避免指针强转违反严格别名规则*/
@@ -57,25 +82,60 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	/*四舍五入到目标小数位，整体当一个整数处理。
 	  越过 2^32 的 float 转 uint32 是未定义行为，必须先判断。非负 float 的位模式
 	  与数值同序，位模式 >= 0x4F800000 即 >= 2^32，免去一次软件浮点比较*/
-	scaled_f = v * VOFA_Scale[VOFA_DECIMALS] + 0.5f;
+	scaled_f = v * VOFA_Scale[VOFA_DECIMALS];
 	memcpy(&bits, &scaled_f, 4u);
+#if (VOFA_DECIMALS > 0)
+	/*带 VOFA_DECIMALS 位小数放不进 32 位时减少小数位，量程扩到 2^32：
+	  v >= 2^22（位模式 0x4A800000）时 float 分辨率已 >= 0.5，小数没有有效信息，直接只输出整数，
+	  3 位及以下小数只会走这一支（3 位即 v 超过约 429 万）；
+	  更小的 v 只有 4 位及以上小数才会放不下，逐位减少，保留放得下的最多位（如 6 位小数时
+	  5000.25 输出 5 位小数），v < 2^22 保证最晚减到 3 位就放得下*/
+	if (bits >= 0x4F800000u)
+	{
+		memcpy(&bits, &v, 4u);
+		if (bits >= 0x4A800000u)
+		{
+			dec = 0u;
+			scaled_f = v;
+			memcpy(&bits, &scaled_f, 4u);
+		}
+		else
+		{
+			do
+			{
+				dec--;
+				scaled_f = v * VOFA_Scale[dec];
+				memcpy(&bits, &scaled_f, 4u);
+			} while (bits >= 0x4F800000u);
+		}
+	}
+#endif
+	/*>= 2^23 的 float 本身已是整数，不能再加 0.5：奇数加 0.5 恰好是平局，
+	  按"就近取偶"会舍入成 +1（如 9999999 输出成 10000000）*/
+	if (bits < 0x4B000000u)
+	{
+		scaled_f += 0.5f;
+		memcpy(&bits, &scaled_f, 4u);
+	}
 	scaled = (bits >= 0x4F800000u) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
 
-	/*从最低位起逆序取数：先定长 VOFA_DECIMALS 位小数（不足补零），再整数部分。
-	  余数用"原值 - 商*10"求，每位只调一次除法：分开写 /10 和 %10 时，
-	  实测 GCC 14 在 M0+ 上会各调一次库函数，并不合并*/
+	/*从最低位起逆序取数：先定长 dec 位小数（不足补零），再整数部分。
+	  每位求一次商（VOFA_Div10，不调库除法），余数用"原值 - 商*10"求*/
 #if (VOFA_DECIMALS > 0)
-	for (k = 0; k < VOFA_DECIMALS; k++)
+	if (dec > 0u)
 	{
-		q = scaled / 10u;
-		rev[n++] = (char)('0' + (scaled - q * 10u));
-		scaled = q;
+		for (k = 0; k < dec; k++)
+		{
+			q = VOFA_Div10(scaled);
+			rev[n++] = (char)('0' + (scaled - q * 10u));
+			scaled = q;
+		}
+		rev[n++] = '.';
 	}
-	rev[n++] = '.';
 #endif
 	do
 	{
-		q = scaled / 10u;
+		q = VOFA_Div10(scaled);
 		rev[n++] = (char)('0' + (scaled - q * 10u));
 		scaled = q;
 	} while (scaled);

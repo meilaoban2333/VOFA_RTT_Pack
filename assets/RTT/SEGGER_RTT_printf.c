@@ -644,10 +644,16 @@ int SEGGER_RTT_vprintf(unsigned BufferIndex, const char * sFormat, va_list * pPa
     //
     // Write remaining data, if any
     //
+    // 本工程修改：SEGGER 原版在这里又加了一次 Cnt，而 _StoreChar 已逐字计过数，
+    // 最后一段被重复计数（LOG("abc") 返回 6）；原版还忽略这次写入的结果，
+    // 缓冲满被丢弃时仍返回正数。改为返回实际写入字节数，有内容被丢弃时返回 -1，
+    // 与 _StoreChar 中间段写入失败的处理一致。
+    //
     if (BufferDesc.Cnt != 0u) {
-      SEGGER_RTT_Write(BufferIndex, acBuffer, BufferDesc.Cnt);
+      if (SEGGER_RTT_Write(BufferIndex, acBuffer, BufferDesc.Cnt) != BufferDesc.Cnt) {
+        BufferDesc.ReturnValue = -1;
+      }
     }
-    BufferDesc.ReturnValue += (int)BufferDesc.Cnt;
   }
   return BufferDesc.ReturnValue;
 }
