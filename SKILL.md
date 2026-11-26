@@ -98,7 +98,7 @@ VOFA+ 发送框发命令 --TCP 19021--> start_rtt.bat --> 底层工具 --> RTT 0
 | 文件 | 作用 | 需要改吗 |
 |------|------|----------|
 | `SEGGER_RTT.c/.h` | SEGGER 官方 RTT 核心 | 不改 |
-| `SEGGER_RTT_printf.c` | RTT 格式化输出，**本包已补 `%f` 支持** | 不改 |
+| `SEGGER_RTT_printf.c` | RTT 格式化输出，**本包已补 `%f` 支持、修正返回值** | 不改 |
 | `SEGGER_RTT_Conf.h` | RTT 配置 | **可能要改**，见步骤 4 |
 | `vofa_rtt.c/.h` | 双协议组帧封装层 + `LOG()` 宏 | **选协议**，按需改通道数/小数位 |
 
@@ -234,6 +234,7 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧插不进
 这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行分段写入，内容仍完整但失去这个保证。
+`LOG()` 返回实际写入的字节数，缓冲满有内容被丢弃时返回 -1（SEGGER 原版返回值会重复计数，本包已修）。
 不需要格式化的固定文本用 `VOFA_RTT_SendStr()`，整串一次写入、没有格式化开销。
 
 ### 两种协议下 LOG 的行为不同
@@ -415,6 +416,8 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
   或直接换 JustFloat——它传原始 float，没有量程和精度损失。
 - **JustFloat 依赖小端序**。ARM Cortex-M 默认小端，满足；移植到大端平台需要
   逐通道字节翻转，本包未做。
+- **M3/M4/M7/M33 + AC6/GCC 下 SEGGER 默认 `RTT_USE_ASM=1`**：`SEGGER_RTT_WriteSkipNoLock` 会换成汇编版，
+  本包没带对应 `.S` 文件。本包不调用它，不受影响；用户自己调用会链接报错，此时在编译选项里定义 `RTT_USE_ASM=0`。
 - **JustFloat 下 Inf/NaN 也被置 0**：`+Inf` 的字节与帧尾 `00 00 80 7F` 完全相同，原样发出
   会让 VOFA+ 在帧中间提前切帧。波形上某通道恒为 0 时，先查源变量是否除零或溢出。
 - `LOG()` 在 FireWater 下与波形共用 0 号通道，同时用会污染数据流；

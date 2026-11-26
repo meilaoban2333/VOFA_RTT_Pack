@@ -57,7 +57,7 @@ VOFA_RTT_Pack/
 │   ├── RTT/                 # The six source files to copy into your project
 │   │   ├── SEGGER_RTT.c/.h
 │   │   ├── SEGGER_RTT_Conf.h
-│   │   ├── SEGGER_RTT_printf.c   # %f support added (the SEGGER original has none)
+│   │   ├── SEGGER_RTT_printf.c   # %f support added (the SEGGER original has none), return value fixed
 │   │   └── vofa_rtt.c/.h         # dual-protocol framing layer + LOG() macro, protocol macro lives here
 │   ├── examples/
 │   │   └── log_demo.c/.h    # optional: toggle watched items with downlink AT commands (you only write a variable table)
@@ -345,6 +345,8 @@ print an `Inf`/`NaN` marker instead of silently wrapping.
 Output of up to 128 bytes per call (`SEGGER_RTT_PRINTF_BUFFER_SIZE`) is written to RTT in one go: a
 waveform frame sent from an interrupt cannot land in the middle of the line, and when the buffer is full the
 whole line is dropped rather than half of it. Longer lines are written in pieces and lose this guarantee.
+`LOG()` returns the number of bytes actually written, or -1 when the buffer was full and something was
+dropped (SEGGER's original return value counts the last piece twice; this package fixes that).
 
 For fixed text that needs no formatting, use `VOFA_RTT_SendStr("motor start\n")`: the whole string is
 written at once with no formatting cost, under the same rules as `LOG()` (FireWater only). For custom
@@ -532,6 +534,9 @@ Worth reading before changing anything:
   intact. If the range is too small, scale on the MCU before sending, or switch to JustFloat.
 - **JustFloat relies on little-endian byte order**: ARM Cortex-M is little-endian by default; big-endian
   platforms would need per-channel byte swapping, which this pack does not do.
+- **SEGGER defaults to `RTT_USE_ASM=1` on M3/M4/M7/M33 with AC6/GCC**: `SEGGER_RTT_WriteSkipNoLock` is then
+  replaced by an assembly version whose `.S` file this pack does not ship. This pack never calls it, so it is
+  unaffected; calling it yourself gives a link error, in which case define `RTT_USE_ASM=0` in the compiler options.
 - **Text and waveform must never share a JustFloat stream**: text bytes would be parsed as floats, or hit
   the frame tail `00 00 80 7F` and shift every channel from then on. That is why `LOG()` is disabled at
   compile time for this protocol, and `VOFA_RTT_SendStr()` sends nothing.

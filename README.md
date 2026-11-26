@@ -52,7 +52,7 @@ VOFA_RTT_Pack/
 │   ├── RTT/                 # 直接拷进工程的六个源文件
 │   │   ├── SEGGER_RTT.c/.h
 │   │   ├── SEGGER_RTT_Conf.h
-│   │   ├── SEGGER_RTT_printf.c   # 已补 %f 支持（SEGGER 原版不支持）
+│   │   ├── SEGGER_RTT_printf.c   # 已补 %f 支持（SEGGER 原版不支持），已修返回值
 │   │   └── vofa_rtt.c/.h         # 双协议组帧封装层 + LOG() 宏，协议宏也在这
 │   ├── examples/
 │   │   └── log_demo.c/.h    # 可选：下行 AT 命令动态开关观察项（只需在自己文件里写变量表）
@@ -318,6 +318,7 @@ LOG("id=%d speed=%.2f flag=%s\n", id, speed, ok ? "OK" : "NG");
 
 单条输出不超过 128 字节（`SEGGER_RTT_PRINTF_BUFFER_SIZE`）时一次写入 RTT：中断里发的波形帧
 插不进这一行中间，缓冲满时整条丢弃而不是只写半截。更长的行会分段写入，失去这个保证。
+`LOG()` 返回实际写入的字节数，缓冲满有内容被丢弃时返回 -1（SEGGER 原版返回值会把最后一段重复计数，本包已修）。
 
 不需要格式化的固定文本用 `VOFA_RTT_SendStr("motor start\n")`，整串一次写入、没有格式化开销，
 规则与 `LOG()` 相同（仅 FireWater）。要发自定义二进制内容用 `VOFA_RTT_SendRaw(buf, len)`，
@@ -478,6 +479,8 @@ sh tests/run_tests.sh
   量程不够时在 MCU 侧先缩放再发，或直接切 JustFloat。
 - **JustFloat 依赖小端序**：ARM Cortex-M 默认小端，满足；大端平台需逐通道字节翻转，
   本包未做。
+- **M3/M4/M7/M33 + AC6/GCC 下 SEGGER 默认 `RTT_USE_ASM=1`**：`SEGGER_RTT_WriteSkipNoLock` 会换成汇编版，
+  本包没带对应的 `.S` 文件。本包不调用它，不受影响；自己调用它会链接报错，此时在编译选项里定义 `RTT_USE_ASM=0`。
 - **JustFloat 下文本与波形绝对不能混流**：文本字节会被当 float 解析，或撞上帧尾
   `00 00 80 7F` 导致此后所有通道错位。所以 `LOG()` 在该协议下被编译期禁用，
   `VOFA_RTT_SendStr()` 也不发送。

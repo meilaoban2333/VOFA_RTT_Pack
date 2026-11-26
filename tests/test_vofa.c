@@ -86,6 +86,15 @@ static void expect_uint(const char *name, unsigned got, unsigned exp)
     if (got == exp) { g_pass++; printf("  PASS %s\n", name); }
     else { g_fail++; printf("  FAIL %s: got %u, exp %u\n", name, got, exp); }
 }
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 3)
+/* LOG() 返回 int，可能为 -1 */
+static void expect_int(const char *name, int got, int exp)
+{
+    if (got == exp) { g_pass++; printf("  PASS %s\n", name); }
+    else { g_fail++; printf("  FAIL %s: got %d, exp %d\n", name, got, exp); }
+}
+#endif
+
 /* 检查回调收到的行内容和长度 */
 #define EXPECT_LINE(name, s) \
     expect_uint(name, (strcmp(t_hookLine, s) == 0 && t_hookLen == strlen(s)) ? 1u : 0u, 1u)
@@ -210,6 +219,26 @@ int main(void)
         LOG("%s", line);
         expect_uint("LOG 100B single write", g_writes, 1);
         EXPECT_STR("LOG 100B bytes", line);
+    }
+
+    /* LOG 返回实际写入字节数：SEGGER 原版会把最后一段重复计数（"abc" 返回 6） */
+    expect_int("LOG ret abc", LOG("abc"), 3);           EXPECT_STR("LOG abc bytes", "abc");
+    expect_int("LOG ret fmt", LOG("x=%d", 42), 4);      EXPECT_STR("LOG fmt bytes", "x=42");
+    {
+        /* 200 字符超过 128 字节格式化缓冲，分两段写 */
+        char line200[201];
+        memset(line200, 'b', 199); line200[199] = '\n'; line200[200] = 0;
+        expect_int("LOG ret 200B chunked", LOG("%s", line200), 200);
+        EXPECT_STR("LOG 200B bytes", line200);
+    }
+    {
+        /* 缓冲只剩 3 字节：整行被丢弃，返回 -1 而不是正数 */
+        static char fill[BUFFER_SIZE_UP];
+        const unsigned keep = (BUFFER_SIZE_UP - 1u) - 3u;
+        memset(fill, 'f', sizeof(fill));
+        VOFA_RTT_SendRaw(fill, keep);
+        expect_int("LOG dropped when full -> -1", LOG("abcdef"), -1);
+        expect_bytes("LOG full: only fill bytes", fill, keep);
     }
 
 #ifndef VOFA_SEND
