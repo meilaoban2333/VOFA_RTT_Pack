@@ -38,7 +38,7 @@ The host side is a single script, `start_rtt.bat`. Double-click it and:
 | Setup | Status |
 |-------|--------|
 | STM32F407VE (Cortex-M4), STM32G070RB (Cortex-M0+) + Keil AC6 + J-Link V864 (previous single-tool script) | Tested |
-| Firmware framing, drop return values, downlink command parsing | Covered by the host tests, see "Host tests". After the FireWater fixed-point conversion was changed to one division per digit, its output matches the old version byte for byte (compared on the host); not yet re-tested on a board |
+| Firmware framing, drop return values, downlink command parsing | Covered by the host tests, see "Host tests". The FireWater fixed-point conversion now divides by 10 with shifts and adds (no library division; verified against all 2^32 inputs), and a rounding issue that added 1 to odd integers above 2^23 was fixed; covered by the host tests, not yet re-tested on a board |
 | STM32G070RB + Horco CMSIS-DAP v2 + this script | Tested: probe detection; 100 / 200 frames/s with no bad frames; build-and-download (including skipping an unchanged build); yielding to and resuming after another OpenOCD that really programs the chip; `flash` mode; recovery after unplugging the probe and after the backend process is killed; VOFA+ stays connected throughout. The test firmware used JustFloat; the script relays the bytes unchanged and does not depend on the protocol. Build-and-download was tested by writing out an `.axf` / `.elf` to simulate a build, not with a real Keil / EIDE build |
 | J-Link + this script | Not tested |
 | ST-Link, CMSIS-DAP with only a v1 (HID) interface + this script | Not tested |
@@ -111,7 +111,8 @@ at fault; JustFloat is a binary blob and debugging it is guesswork.
 
 **Three cases for JustFloat**: sample rates in the kHz range; a Cortex-M0/M0+ target (no FPU and no
 hardware divider, so float-to-ASCII took about 28 us per channel, tens of times the RTT write itself;
-measured before the number of divisions was reduced, now somewhat less, not re-measured);
+that was the old implementation; it now does one division per digit with shifts and adds instead of a
+library call, which should be much faster, not re-measured yet);
 full float precision or values beyond the fixed-point range.
 
 ## Two ways to use it
@@ -518,8 +519,8 @@ Worth reading before changing anything:
 - **JustFloat saves formatting cost, not transfer cost**: it copies the raw float bytes and only replaces
   Inf/NaN with 0 (the bytes of `+Inf` equal the frame tail `00 00 80 7F`, so sending it as is would make
   VOFA+ cut the frame early). The
-  difference is largest on M0/M0+ — float-to-ASCII took about 28 us per channel (measured before the
-  number of divisions was reduced, not re-measured since) while the RTT write itself takes about 1-2 us,
+  difference is largest on M0/M0+ — float-to-ASCII took about 28 us per channel (measured on the
+  old implementation; it now divides by 10 with shifts and adds instead of a library call, not re-measured) while the RTT write itself takes about 1-2 us,
   so formatting is the real bottleneck.
 - **Both protocols share one sending API.** `VOFA_RTT_Send()` compiles into one of two implementations
   depending on `VOFA_PROTOCOL`; the other one and its helpers are dropped, costing no flash and raising no

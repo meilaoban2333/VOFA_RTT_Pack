@@ -107,6 +107,16 @@ static void feed(const char *s)
     drain(sink);
 }
 
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 0)
+/* 读空缓冲并与 s 比较，不打印；大批量扫描用，避免刷屏 */
+static int drain_equals(const char *s)
+{
+    static unsigned char got[BUFFER_SIZE_UP + 1];
+    unsigned n = drain(got);
+    return n == strlen(s) && memcmp(got, s, n) == 0;
+}
+#endif
+
 /* 测缓冲满：先占到只剩 3 字节，再发一帧应整帧丢弃并返回 0 */
 static void test_full_buffer(void)
 {
@@ -150,6 +160,8 @@ int main(void)
     VOFA_RTT_Send1(5000000.0f);       EXPECT_STR("Send1 5e6 -> int", "5000000\n");
     VOFA_RTT_Send1(-5000000.0f);      EXPECT_STR("Send1 -5e6 -> int", "-5000000\n");
     VOFA_RTT_Send1(4000000000.0f);    EXPECT_STR("Send1 4e9 -> int", "4000000000\n");
+    /* 2^23 以上的奇数整数不能被 +0.5 凑成平局舍入成 +1 */
+    VOFA_RTT_Send1(9999999.0f);       EXPECT_STR("Send1 odd int >= 2^23 exact", "9999999\n");
     VOFA_RTT_Send1(5e9f);             EXPECT_STR("Send1 5e9 saturates", "4294967295\n");
 
     /* 通道数满 VOFA_CH_MAX 且每个数都是最长写法，验证组帧缓冲够大 */
@@ -322,6 +334,27 @@ int main(void)
     VOFA_RTT_Send1(4294967040.0f);    EXPECT_STR("Send1 max float < 2^32", "4294967040\n");
     expect_uint("Send1 ret", VOFA_RTT_Send1(7.0f), 2);
     EXPECT_STR("Send1 ret bytes", "7\n");
+
+    /* 逐位取商的除以 10 改写后行为不变：0..99999 全扫 + 各位数边界点。
+       这些整数 float 都能精确表示，期望值直接用 snprintf 生成 */
+    {
+        static const uint32_t pts[] = { 9u, 10u, 99u, 100u, 999u, 1000u, 9999u, 10000u, 99999u, 100000u,
+            999999u, 1000000u, 9999999u, 10000000u, 16777215u, 16777216u, 4294967040u };
+        char exp[16];
+        unsigned bad = 0;
+        uint32_t i;
+        for (i = 0; i < 100000u; i++) {
+            snprintf(exp, sizeof(exp), "%lu\n", (unsigned long)i);
+            VOFA_RTT_Send1((float)i);
+            if (!drain_equals(exp)) bad++;
+        }
+        for (i = 0; i < sizeof(pts) / sizeof(pts[0]); i++) {
+            snprintf(exp, sizeof(exp), "%lu\n", (unsigned long)pts[i]);
+            VOFA_RTT_Send1((float)pts[i]);
+            if (!drain_equals(exp)) bad++;
+        }
+        expect_uint("Div10 sweep mismatches", bad, 0);
+    }
 #endif
 
 #if (VOFA_PROTOCOL == VOFA_PROTO_JUSTFLOAT)

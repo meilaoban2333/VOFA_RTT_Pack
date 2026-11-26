@@ -13,6 +13,28 @@
 static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1e7f, 1e8f, 1e9f};
 
 /**
+ * @brief 求 n / 10，只用移位和加法（Hacker's Delight divu10），对全部 32 位输入精确
+ * @note  M0/M0+ 无硬件除法，"/ 10u" 会编译成 __aeabi_uidiv 库调用，这里约 20 条单周期指令。
+ *        M3/M4 上编译器本可用 umull 三条指令完成，统一用本函数只多约 10 条，
+ *        换来主机测试覆盖的就是上板跑的同一份代码
+ */
+static uint32_t VOFA_Div10(uint32_t n)
+{
+	uint32_t q;
+	uint32_t r;
+
+	/*q 先逼近 n * 0.8，右移 3 位得 n / 10 的近似，最多偏小 1*/
+	q = (n >> 1) + (n >> 2);
+	q = q + (q >> 4);
+	q = q + (q >> 8);
+	q = q + (q >> 16);
+	q = q >> 3;
+	/*用余数修正：余数 > 9 说明商偏小 1*/
+	r = n - (((q << 2) + q) << 1);
+	return q + (r > 9u);
+}
+
+/**
  * @brief 把 float 转成定点十进制 ASCII，写入 buf
  * @param buf 输出缓冲，需至少 VOFA_NUM_MAX 字节，不追加结束符
  * @param v   待转换的值
@@ -22,7 +44,7 @@ static const float VOFA_Scale[10] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1
  *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
  *        |v| × 10^VOFA_DECIMALS 超出 32 位时去掉小数只输出整数，|v| >= 2^32 饱和到 4294967295。
  *        M0/M0+ 无 FPU 也无硬件除法，浮点比较和整数除法都是库函数调用，
- *        所以符号、NaN/Inf、越界都按位模式判断，每个十进制位只做一次除法。
+ *        所以符号、NaN/Inf、越界都按位模式判断，除以 10 用移位加法（VOFA_Div10）。
  */
 static unsigned VOFA_FloatToStr(char *buf, float v)
 {
@@ -59,7 +81,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	/*四舍五入到目标小数位，整体当一个整数处理。
 	  越过 2^32 的 float 转 uint32 是未定义行为，必须先判断。非负 float 的位模式
 	  与数值同序，位模式 >= 0x4F800000 即 >= 2^32，免去一次软件浮点比较*/
-	scaled_f = v * VOFA_Scale[VOFA_DECIMALS] + 0.5f;
+	scaled_f = v * VOFA_Scale[VOFA_DECIMALS];
 	memcpy(&bits, &scaled_f, 4u);
 #if (VOFA_DECIMALS > 0)
 	/*带小数放不进 32 位时（3 位小数即 v 超过约 429 万）改为只输出整数，量程扩到 2^32。
@@ -67,21 +89,27 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	int_only = (bits >= 0x4F800000u);
 	if (int_only)
 	{
-		scaled_f = v + 0.5f;
+		scaled_f = v;
 		memcpy(&bits, &scaled_f, 4u);
 	}
 #endif
+	/*>= 2^23 的 float 本身已是整数，不能再加 0.5：奇数加 0.5 恰好是平局，
+	  按"就近取偶"会舍入成 +1（如 9999999 输出成 10000000）*/
+	if (bits < 0x4B000000u)
+	{
+		scaled_f += 0.5f;
+		memcpy(&bits, &scaled_f, 4u);
+	}
 	scaled = (bits >= 0x4F800000u) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
 
 	/*从最低位起逆序取数：先定长 VOFA_DECIMALS 位小数（不足补零），再整数部分。
-	  余数用"原值 - 商*10"求，每位只调一次除法：分开写 /10 和 %10 时，
-	  实测 GCC 14 在 M0+ 上会各调一次库函数，并不合并*/
+	  每位求一次商（VOFA_Div10，不调库除法），余数用"原值 - 商*10"求*/
 #if (VOFA_DECIMALS > 0)
 	if (!int_only)
 	{
 		for (k = 0; k < VOFA_DECIMALS; k++)
 		{
-			q = scaled / 10u;
+			q = VOFA_Div10(scaled);
 			rev[n++] = (char)('0' + (scaled - q * 10u));
 			scaled = q;
 		}
@@ -90,7 +118,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 #endif
 	do
 	{
-		q = scaled / 10u;
+		q = VOFA_Div10(scaled);
 		rev[n++] = (char)('0' + (scaled - q * 10u));
 		scaled = q;
 	} while (scaled);
