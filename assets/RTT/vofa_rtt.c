@@ -42,7 +42,8 @@ static uint32_t VOFA_Div10(uint32_t n)
  * @note  只做定点转换，不支持科学计数法：VOFA+ 波形观察的量程有限，
  *        定点足够且避免引入 C 库 sprintf（体积大且可能不可重入）。
  *        非有限值(NaN/Inf)统一输出 0，防止上位机解析出断点。
- *        |v| × 10^VOFA_DECIMALS 超出 32 位时去掉小数只输出整数，|v| >= 2^32 饱和到 4294967295。
+ *        |v| × 10^VOFA_DECIMALS 超出 32 位时减少小数位（|v| >= 2^22 时只输出整数），
+ *        |v| >= 2^32 饱和到 4294967295。
  *        M0/M0+ 无 FPU 也无硬件除法，浮点比较和整数除法都是库函数调用，
  *        所以符号、NaN/Inf、越界都按位模式判断，除以 10 用移位加法（VOFA_Div10）。
  */
@@ -57,7 +58,7 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	float    scaled_f;
 #if (VOFA_DECIMALS > 0)
 	unsigned k;
-	unsigned int_only;/*带小数放不下 32 位，只输出整数部分*/
+	unsigned dec = VOFA_DECIMALS;/*实际输出的小数位数，放不下 32 位时减少*/
 #endif
 
 	/*经 memcpy 取位模式，避免指针强转违反严格别名规则*/
@@ -84,13 +85,29 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	scaled_f = v * VOFA_Scale[VOFA_DECIMALS];
 	memcpy(&bits, &scaled_f, 4u);
 #if (VOFA_DECIMALS > 0)
-	/*带小数放不进 32 位时（3 位小数即 v 超过约 429 万）改为只输出整数，量程扩到 2^32。
-	  float 在 2^22 以上分辨率已 >= 0.5，去掉小数不丢有效信息*/
-	int_only = (bits >= 0x4F800000u);
-	if (int_only)
+	/*带 VOFA_DECIMALS 位小数放不进 32 位时减少小数位，量程扩到 2^32：
+	  v >= 2^22（位模式 0x4A800000）时 float 分辨率已 >= 0.5，小数没有有效信息，直接只输出整数，
+	  3 位及以下小数只会走这一支（3 位即 v 超过约 429 万）；
+	  更小的 v 只有 4 位及以上小数才会放不下，逐位减少，保留放得下的最多位（如 6 位小数时
+	  5000.25 输出 5 位小数），v < 2^22 保证最晚减到 3 位就放得下*/
+	if (bits >= 0x4F800000u)
 	{
-		scaled_f = v;
-		memcpy(&bits, &scaled_f, 4u);
+		memcpy(&bits, &v, 4u);
+		if (bits >= 0x4A800000u)
+		{
+			dec = 0u;
+			scaled_f = v;
+			memcpy(&bits, &scaled_f, 4u);
+		}
+		else
+		{
+			do
+			{
+				dec--;
+				scaled_f = v * VOFA_Scale[dec];
+				memcpy(&bits, &scaled_f, 4u);
+			} while (bits >= 0x4F800000u);
+		}
 	}
 #endif
 	/*>= 2^23 的 float 本身已是整数，不能再加 0.5：奇数加 0.5 恰好是平局，
@@ -102,12 +119,12 @@ static unsigned VOFA_FloatToStr(char *buf, float v)
 	}
 	scaled = (bits >= 0x4F800000u) ? 0xFFFFFFFFu : (uint32_t)scaled_f;
 
-	/*从最低位起逆序取数：先定长 VOFA_DECIMALS 位小数（不足补零），再整数部分。
+	/*从最低位起逆序取数：先定长 dec 位小数（不足补零），再整数部分。
 	  每位求一次商（VOFA_Div10，不调库除法），余数用"原值 - 商*10"求*/
 #if (VOFA_DECIMALS > 0)
-	if (!int_only)
+	if (dec > 0u)
 	{
-		for (k = 0; k < VOFA_DECIMALS; k++)
+		for (k = 0; k < dec; k++)
 		{
 			q = VOFA_Div10(scaled);
 			rev[n++] = (char)('0' + (scaled - q * 10u));

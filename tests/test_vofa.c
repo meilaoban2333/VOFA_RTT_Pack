@@ -386,6 +386,19 @@ int main(void)
     }
 #endif
 
+#if (VOFA_PROTOCOL == VOFA_PROTO_FIREWATER) && (VOFA_DECIMALS == 6)
+    printf("[FireWater, VOFA_DECIMALS=6]\n");
+    /* 小数位多时 2^32 / 10^6 只有约 4295：放不下就逐位减少小数，保留放得下的最多位；
+       v >= 2^22 时 float 本身已无小数精度，才只输出整数 */
+    VOFA_RTT_Send1(1.5f);             EXPECT_STR("D6 normal", "1.500000\n");
+    VOFA_RTT_Send1(8000.0f);          EXPECT_STR("D6 8000 keeps 5 decimals", "8000.00000\n");
+    /* 5000.25f * 1e5f 舍入成 float 是 500024992，末位是 float 乘法的固有误差 */
+    VOFA_RTT_Send1(5000.25f);         EXPECT_STR("D6 5000.25 keeps 5 decimals", "5000.24992\n");
+    VOFA_RTT_Send1(-50000.0f);        EXPECT_STR("D6 -50000 keeps 4 decimals", "-50000.0000\n");
+    VOFA_RTT_Send1(5000000.0f);       EXPECT_STR("D6 >= 2^22 -> int", "5000000\n");
+    VOFA_RTT_Send1(5e9f);             EXPECT_STR("D6 5e9 saturates", "4294967295\n");
+#endif
+
 #if (VOFA_PROTOCOL == VOFA_PROTO_JUSTFLOAT)
     printf("[JustFloat]\n");
     {

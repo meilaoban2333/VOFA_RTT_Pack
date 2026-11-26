@@ -69,6 +69,7 @@ JF='s/^#define VOFA_PROTOCOL .*/#define VOFA_PROTOCOL           VOFA_PROTO_JUSTF
 
 run_cfg fw3
 run_cfg fw0 's/^#define VOFA_DECIMALS .*/#define VOFA_DECIMALS           0/'
+run_cfg fw6 's/^#define VOFA_DECIMALS .*/#define VOFA_DECIMALS           6/'
 run_cfg jf "$JF"
 
 echo "[compile checks]"

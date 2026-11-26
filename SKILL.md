@@ -298,10 +298,15 @@ AT+KP=1.5\n -> 不是上面的格式，交给 LogSetCmdHook 注册的回调（�
    };
    ```
 
-   通道数为 0、超过 `VOFA_CH_MAX`、或超出变量大小（如 `short` 变量用了 `LOG_F32`）时编译报错
+   通道数为 0、超过 `VOFA_CH_MAX`、或超出变量大小（如 `short` 变量用了 `LOG_F32`）时编译报错。
+   检查只看大小，**拦不住指针和 `double`**（能编过但发出的数是错的）；跨文件引用的数组，`extern` 声明里要带长度
 3. `VOFA_RTT_Init()` 之后调 `LogInit(s_logItems, sizeof(s_logItems) / sizeof(s_logItems[0]))`；
    需要自定义命令（如 `AT+KP=1.5`）时再 `LogSetCmdHook(回调)`，回调参数 `(const char *line, unsigned len)`，`line` 以 `'\0'` 结尾
-4. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）
+4. 周期调用 `LogTask()`（建议 20~50ms 一次，放主循环节流或定时器回调里）；
+   放在定时器中断里时，主循环里调 `LogInit()`（包括运行中换表）也是安全的
+
+**从旧版模板升级**：旧版的 `LOG_ID_xxx`、`LogPrint()`、`LOG_CH_MAX` 已删除。覆盖成新文件后必须按上面写表并调
+`LogInit()`；只调 `LogTask()` 的老代码照样能编过，但不会再有任何输出。
 
 可配置项（`log_demo.h`，都可在编译选项里覆盖）：`LOG_ITEM_MAX`（最多登记项数，默认 64）、
 `LOG_LINE_MAX`（一条命令最多字符数，默认 32）。打开某项后一帧会超过 `VOFA_CH_MAX` 时这次打开不生效，
@@ -411,7 +416,8 @@ Keil 调试（Ctrl+F5）仍走 Keil 自己的驱动，调试前在脚本窗口�
 - FireWater 的 float→ASCII 转换有实打实的开销，**不要放进电流环等高频中断**；
   需要极限性能就切 JustFloat（`memcpy` 级开销）。
 - `vofa_rtt.c` 的 `VOFA_FloatToStr()`（**仅 FireWater**）只做定点，不支持科学计数法，
-  带小数放不下 32 位时（3 位小数即超过约 429 万）自动去掉小数只输出整数，超过 ±4294967295 饱和，
+  带小数放不下 32 位时（3 位小数即超过约 429 万）自动减少小数位：值 ≥ 2^22 只输出整数，更小的值
+  （4 位及以上小数才会遇到）保留放得下的最多位；超过 ±4294967295 饱和，
   NaN/Inf 输出 0 以保持帧结构完整。量程不够时在 MCU 侧先缩放，
   或直接换 JustFloat——它传原始 float，没有量程和精度损失。
 - **JustFloat 依赖小端序**。ARM Cortex-M 默认小端，满足；移植到大端平台需要

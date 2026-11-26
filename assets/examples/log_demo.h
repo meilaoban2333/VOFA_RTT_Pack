@@ -40,6 +40,10 @@
 *   2. 登记的变量需自然对齐（普通全局变量都满足）；packed 结构体成员不行，
 *      M0/M0+ 上非对齐访问会 HardFault。
 *   3. 多通道项读取时不关中断，中断里正在改的数组可能前后通道来自不同时刻。
+*   4. 编译期检查只看大小，拦不住指针和 double：LOG_F32 用在指针或 double 变量上
+*      能编过，但发出去的数是错的。跨文件引用的数组，extern 声明里要带长度。
+*   5. 从旧版模板升级：旧版的 LOG_ID_xxx / LogPrint() / LOG_CH_MAX 已删除，
+*      必须写表并调 LogInit()，只调 LogTask() 的老代码能编过但不再有输出。
 ***********************************************************************
 */
 
@@ -97,6 +101,7 @@ typedef struct {
 typedef void (*LogCmdHook)(const char *line, unsigned len);
 
 /* 登记观察项表并清空所有开关。表要在 LogTask() 运行期间一直有效（用 static/全局）。
+   LogTask() 跑在定时器中断里时，在主循环里调用本函数（包括运行中换表）也是安全的。
    items 为空指针时当 0 项；num 超过 LOG_ITEM_MAX 时只登记前 LOG_ITEM_MAX 项 */
 void LogInit(const LogItem *items, unsigned num);
 

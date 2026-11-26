@@ -19,9 +19,11 @@
 /* 开关位图的字数 */
 #define LOG_ON_WORDS ((LOG_ITEM_MAX + 31) / 32)
 
-static const LogItem *s_items = 0;
-static unsigned s_num = 0;
-static uint32_t s_on[LOG_ON_WORDS]; /* bit i 对应表里第 i 项（即 i+1 号） */
+/* LogTask 可能跑在定时器中断里、LogInit 在主循环里换表，三者都用 volatile，
+   保证编译器按 LogInit 里写的顺序落地，见 LogInit 注释 */
+static const LogItem *volatile s_items = 0;
+static volatile unsigned s_num = 0;
+static volatile uint32_t s_on[LOG_ON_WORDS]; /* bit i 对应表里第 i 项（即 i+1 号） */
 static LogCmdHook s_hook = 0;
 
 /* 行缓冲：RTT 下行缓冲仅 BUFFER_SIZE_DOWN(默认16) 字节，命令要跨多次读取拼接。
@@ -39,10 +41,14 @@ void LogInit(const LogItem *items, unsigned num)
     if (num > LOG_ITEM_MAX)
         num = LOG_ITEM_MAX;
 
-    s_items = items;
-    s_num = num;
+    /* 顺序不能换：先把项数清零再清开关、换表，最后写新项数。
+       中断在任一步打断时，看到的要么是 0 项，要么是新表配新项数，
+       不会拿旧项数去索引更短的新表（越界读，M0+ 上可能 HardFault） */
+    s_num = 0;
     for (i = 0; i < LOG_ON_WORDS; i++)
         s_on[i] = 0;
+    s_items = items;
+    s_num = num;
 }
 
 void LogSetCmdHook(LogCmdHook hook)

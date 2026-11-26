@@ -423,9 +423,17 @@ Notes:
 
 - 32-bit integers with a magnitude above 16777216 lose precision when converted to float (VOFA+ only
   understands float).
+- The compile-time check only looks at sizes and **cannot catch pointers or `double`**: `LOG_F32` on a
+  pointer or a `double` compiles but sends wrong numbers. An array used from another file needs its length
+  in the `extern` declaration (e.g. `extern float g_iabc[3];`), otherwise the build fails.
 - Registered variables must be naturally aligned (ordinary globals are); members of packed structs are
   not, and an unaligned access faults on M0/M0+.
 - The on/off state is not echoed: the uplink is a pure data stream and text would corrupt the waveform.
+- Running `LogTask()` from a timer interrupt while `LogInit()` is called from the main loop (including
+  switching tables at run time) is safe.
+- **Upgrading from the old template**: `LOG_ID_xxx`, `LogPrint()` and `LOG_CH_MAX` are gone. After
+  replacing the files with the new `log_demo.c/.h`, write a table in your own file and call `LogInit()`;
+  old code that only calls `LogTask()` still compiles but no longer outputs anything.
 
 **Works with both protocols without changes**: output goes through `VOFA_RTT_Send()`, so the frame format
 follows `VOFA_PROTOCOL`; commands use the downlink channel, which is independent of the uplink protocol,
@@ -528,9 +536,10 @@ Worth reading before changing anything:
   depending on `VOFA_PROTOCOL`; the other one and its helpers are dropped, costing no flash and raising no
   unused warnings.
 - **FireWater's fixed-point conversion has no scientific notation**: the limit with `VOFA_DECIMALS`
-  decimals is about 4.29×10^9 / 10^decimals (about 4.29 million with 3 decimals). Above it the decimals
-  are dropped and only the integer is sent (a float that large has no fractional precision anyway);
-  beyond ±4294967295 the value saturates to the limit. NaN/Inf become 0 to keep the frame structure
+  decimals is about 4.29×10^9 / 10^decimals (about 4.29 million with 3 decimals). Above it fewer decimals
+  are sent: from 2^22 (about 4.19 million) only the integer (a float that large has no fractional
+  precision anyway); smaller values (only reachable with 4 or more decimals) keep as many decimals as
+  fit; beyond ±4294967295 the value saturates to the limit. NaN/Inf become 0 to keep the frame structure
   intact. If the range is too small, scale on the MCU before sending, or switch to JustFloat.
 - **JustFloat relies on little-endian byte order**: ARM Cortex-M is little-endian by default; big-endian
   platforms would need per-channel byte swapping, which this pack does not do.
